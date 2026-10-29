@@ -70,19 +70,22 @@ public final class GlassesService: ObservableObject {
     // MARK: SDK handles (nil when the SDK isn't configured)
     private var wearables: WearablesInterface?
     private var deviceSelector: AutoDeviceSelector?
-    private var streamSession: StreamSession?
+    private var deviceSession: DeviceSession?
+    private var camera: MWDATCamera.Camera?
+    private var streamConfig = StreamConfiguration(
+        videoCodec: VideoCodec.raw,
+        resolution: .medium,
+        frameRate: 24
+    )
 
+    private var sessionStateToken: AnyListenerToken?
+    private var sessionErrorToken: AnyListenerToken?
     private var stateToken: AnyListenerToken?
     private var frameToken: AnyListenerToken?
     private var errorToken: AnyListenerToken?
     private var photoToken: AnyListenerToken?
     private var deviceTask: Task<Void, Never>?
     private var registrationTask: Task<Void, Never>?
-    // A device only becomes reachable once the app opens a session with it. While
-    // linked we keep a lightweight DeviceStateSession running so the glasses
-    // actually connect (and show as "connected") without needing to open the camera.
-    private var deviceStateSession: DeviceStateSession?
-    private var deviceMonitorTask: Task<Void, Never>?
     private var isProcessingFrame = false
     private var frameSequence: UInt64 = 0
     private var photoContinuation: CheckedContinuation<Data, Error>?
@@ -121,23 +124,20 @@ public final class GlassesService: ObservableObject {
 
         let wearables = Wearables.shared
         let selector = AutoDeviceSelector(wearables: wearables)
-        let config = StreamSessionConfig(
+        self.streamConfig = StreamConfiguration(
             videoCodec: VideoCodec.raw,
             resolution: quality.sdkResolution,
             frameRate: 24
         )
-        let session = StreamSession(streamSessionConfig: config, deviceSelector: selector)
 
         self.wearables = wearables
         self.deviceSelector = selector
-        self.streamSession = session
         self.isAvailable = true
+        self.streamState = .stopped
 
         observeRegistration(wearables)
         observeDevice(selector)
-        observeSession(session)
         observeAppLifecycle()
-        updateStreamState(session.state)
     }
 
     // MARK: - Registration
@@ -202,39 +202,8 @@ public final class GlassesService: ObservableObject {
         }
     }
 
-    /// Keeps a DeviceStateSession running exactly while registered. Its `.running`
-    /// state is the real "glasses connected" signal — being registered alone leaves
-    /// the device idle ("Linked · turn on glasses") until a session brings it online.
     private func syncDeviceMonitoring() {
-        // Disabled: the DeviceStateSession never reaches .running in this setup, and its
-        // DAT audio-session churn (SessionCore "!int" spam) was thrashing the shared
-        // AVAudioSession so the wake-word mic engine (AUIOClient_StartIO) couldn't start.
-        // Connection status comes from activeDeviceStream (observeDevice) instead.
-        stopDeviceMonitoring()
-    }
-
-    private func startDeviceMonitoring() {
-        guard deviceStateSession == nil, let selector = deviceSelector else { return }
-        let session = DeviceStateSession(deviceSelector: selector)
-        deviceStateSession = session
-        deviceMonitorTask = Task { @MainActor [weak self] in
-            // Starting the session helps bring the glasses online; connection status
-            // itself is derived from activeDeviceStream (see observeDevice), which is
-            // the signal the working reference app uses.
-            try? await session.start()
-            while !Task.isCancelled {
-                NSLog("[Glasses] DeviceStateSession.state=\(String(describing: session.state)) hasActiveDevice=\(self?.hasActiveDevice ?? false)")
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-            }
-        }
-    }
-
-    private func stopDeviceMonitoring() {
-        deviceMonitorTask?.cancel(); deviceMonitorTask = nil
-        let session = deviceStateSession
-        deviceStateSession = nil
-        hasActiveDevice = false
-        Task { try? await session?.stop() }
+        // Connection status comes from activeDeviceStream (observeDevice).
     }
 
     private func map(_ state: RegistrationState) -> GlassesRegistration {
@@ -279,31 +248,98 @@ public final class GlassesService: ObservableObject {
     // MARK: - Streaming
 
     public func startStreaming() async {
-        guard let wearables, let streamSession else { return }
+        guard let wearables, let deviceSelector else { return }
+        if let existingCamera = camera, existingCamera.stream.state == .streaming {
+            return
+        }
         // Mark intent up front so an interrupted stream auto-resumes even if the
         // device isn't ready yet (session parks in `waitingForDevice`).
         wantsStreaming = true
         lastError = nil
+        streamState = .waiting
         do {
+            let session: DeviceSession
+            if let existing = deviceSession, existing.state != .stopped, existing.state != .stopping {
+                session = existing
+            } else {
+                if let knownId = wearables.devices.first {
+                    session = try wearables.createSession(deviceSelector: SpecificDeviceSelector(device: knownId))
+                } else {
+                    session = try wearables.createSession(deviceSelector: deviceSelector)
+                }
+                deviceSession = session
+                sessionStateToken = session.statePublisher.listen { [weak self] state in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        if state == .stopped {
+                            self.camera = nil
+                            self.deviceSession = nil
+                            self.latestFrame = nil
+                            self.streamState = .stopped
+                        }
+                    }
+                }
+                sessionErrorToken = session.errorPublisher.listen { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        self?.setError(error.localizedDescription)
+                    }
+                }
+                try session.start()
+            }
+
+            var waited = 0
+            while session.state != .started && waited < 200 {
+                if session.state == .stopped { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                waited += 1
+            }
+            guard session.state == .started else {
+                setError("Glasses session did not start (state=\(String(describing: session.state)))")
+                session.stop()
+                deviceSession = nil
+                streamState = .stopped
+                return
+            }
+
             let status = try await wearables.checkPermissionStatus(Permission.camera)
             if status != .granted {
                 let requested = try await wearables.requestPermission(Permission.camera)
-                guard requested == .granted else { setError("Camera permission denied"); return }
+                guard requested == .granted else {
+                    setError("Camera permission denied")
+                    streamState = .stopped
+                    return
+                }
             }
-            await streamSession.start()
-            updateStreamState(streamSession.state)
+
+            let activeCamera: MWDATCamera.Camera
+            if let existingCamera = camera {
+                activeCamera = existingCamera
+            } else {
+                guard let newCamera = try session.addCamera(config: streamConfig) else {
+                    setError("Could not create glasses camera")
+                    streamState = .stopped
+                    return
+                }
+                camera = newCamera
+                observeSession(newCamera.stream)
+                activeCamera = newCamera
+            }
+            activeCamera.stream.start()
+            updateStreamState(activeCamera.stream.state)
         } catch {
             setError("Could not start streaming: \(error.localizedDescription)")
+            streamState = .stopped
         }
     }
 
     /// Waits up to `timeout` seconds for the glasses camera stream to reach `.streaming`
-    /// (since `StreamSession.start()` transitions through `.starting`/`.waitingForDevice` asynchronously).
+    /// (since `Stream.start()` transitions through `.starting`/`.waitingForDevice` asynchronously).
     public func waitForStreaming(timeout: TimeInterval = 5.0) async -> Bool {
-        guard let streamSession else { return false }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            updateStreamState(streamSession.state)
+            if let stream = camera?.stream {
+                updateStreamState(stream.state)
+            }
             if streamState == .streaming || latestFrame != nil {
                 return true
             }
@@ -312,7 +348,9 @@ public final class GlassesService: ObservableObject {
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        updateStreamState(streamSession.state)
+        if let stream = camera?.stream {
+            updateStreamState(stream.state)
+        }
         return streamState == .streaming || latestFrame != nil
     }
 
@@ -332,12 +370,15 @@ public final class GlassesService: ObservableObject {
     public func stopStreaming() async {
         // Explicit stop clears intent so we don't auto-resume behind the user's back.
         wantsStreaming = false
-        await streamSession?.stop()
+        camera?.stop()
+        camera = nil
+        deviceSession?.stop()
+        deviceSession = nil
         streamState = .stopped
         latestFrame = nil
     }
 
-    private func observeSession(_ session: StreamSession) {
+    private func observeSession(_ session: MWDATCamera.Stream) {
         stateToken = session.statePublisher.listen { [weak self] state in
             Task { @MainActor [weak self] in self?.updateStreamState(state) }
         }
@@ -363,7 +404,7 @@ public final class GlassesService: ObservableObject {
         }
     }
 
-    private func updateStreamState(_ state: StreamSessionState) {
+    private func updateStreamState(_ state: StreamState) {
         switch state {
         case .stopped: streamState = .stopped
         case .streaming: streamState = .streaming
@@ -376,14 +417,22 @@ public final class GlassesService: ObservableObject {
 
     /// Captures a single JPEG photo from the glasses. Requires an active stream.
     public func capturePhoto(timeout: TimeInterval = 8) async throws -> Data {
-        guard let streamSession else { throw GlassesError.unavailable }
+        guard let stream = camera?.stream else { throw GlassesError.unavailable }
         if let existing = photoContinuation {
             existing.resume(throwing: GlassesError.superseded)
             photoContinuation = nil
         }
         return try await withCheckedThrowingContinuation { continuation in
             self.photoContinuation = continuation
-            streamSession.capturePhoto(format: .jpeg)
+            guard stream.capturePhoto(format: .jpeg) else {
+                self.photoContinuation = nil
+                if let fallback = self.currentFrameJPEG() {
+                    continuation.resume(returning: fallback)
+                } else {
+                    continuation.resume(throwing: GlassesError.unavailable)
+                }
+                return
+            }
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 if let pending = self?.photoContinuation {
@@ -406,8 +455,9 @@ public final class GlassesService: ObservableObject {
     }
 
     deinit {
+        sessionStateToken = nil; sessionErrorToken = nil
         stateToken = nil; frameToken = nil; errorToken = nil; photoToken = nil
-        deviceTask?.cancel(); registrationTask?.cancel(); deviceMonitorTask?.cancel()
+        deviceTask?.cancel(); registrationTask?.cancel()
         if let foregroundToken { NotificationCenter.default.removeObserver(foregroundToken) }
     }
 }

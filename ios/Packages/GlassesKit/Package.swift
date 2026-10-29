@@ -3,12 +3,12 @@ import PackageDescription
 
 let package = Package(
     name: "GlassesKit",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS("17.2")],
     products: [
         .library(name: "GlassesKit", targets: ["GlassesKit"])
     ],
     dependencies: [
-        .package(url: "https://github.com/facebook/meta-wearables-dat-ios", exact: "0.5.0")
+        .package(url: "https://github.com/facebook/meta-wearables-dat-ios", exact: "1.0.1")
     ],
     targets: [
         .target(
@@ -16,6 +16,8 @@ let package = Package(
             dependencies: [
                 .product(name: "MWDATCore", package: "meta-wearables-dat-ios"),
                 .product(name: "MWDATCamera", package: "meta-wearables-dat-ios"),
+                .product(name: "MWDATSpeech", package: "meta-wearables-dat-ios"),
+                .product(name: "MWDATInputs", package: "meta-wearables-dat-ios"),
                 .product(name: "MWDATMockDevice", package: "meta-wearables-dat-ios")
             ]
         )

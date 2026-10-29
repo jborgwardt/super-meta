@@ -2,7 +2,7 @@ name: MetaMod
 options:
   bundleIdPrefix: com.justinborgwardt
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "17.2"
   createIntermediateGroups: true
 
 packages:
@@ -18,7 +18,7 @@ packages:
     path: Packages/RealtimeVoice
   MetaWearablesDAT:
     url: https://github.com/facebook/meta-wearables-dat-ios
-    exactVersion: 0.5.0
+    exactVersion: 1.0.1
   HaishinKit:
     url: https://github.com/Turbo1123/HaishinKit.swift
     branch: fix-concurrency
@@ -68,6 +68,10 @@ targets:
         product: MWDATCore
       - package: MetaWearablesDAT
         product: MWDATCamera
+      - package: MetaWearablesDAT
+        product: MWDATSpeech
+      - package: MetaWearablesDAT
+        product: MWDATInputs
       - package: MetaWearablesDAT
         product: MWDATMockDevice
       - package: HaishinKit
