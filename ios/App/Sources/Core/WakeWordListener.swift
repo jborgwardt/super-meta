@@ -10,7 +10,7 @@ import RealtimeVoice
 /// `OSStatus 560557684` (`!int`) when waking while the iPhone is locked.
 private final class WakeAudioEngine: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.priyanshu.metamod.wakeword.audio")
-    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    private lazy var recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var recognitionGeneration = 0
@@ -145,14 +145,15 @@ final class WakeWordListener: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private enum Keys {
-        static let enabled = "wake_word_enabled"
+        static let enabled = "always_on_phone_mic_wake_enabled"
         static let phrase = "wake_phrase"
     }
 
     private init() {
-        // Enabled by default — "Hey Gemini" listens out of the box (asks mic/speech
-        // permission on first foreground). Off only if the user explicitly disables it.
-        self.enabled = defaults.object(forKey: Keys.enabled) as? Bool ?? true
+        // Off by default so the iPhone orange mic indicator stays off while idle,
+        // the mic stays with iOS and other apps when no conversation is active, and
+        // the glasses stay out of Bluetooth HFP call mode so "Hey Meta, start Gem" works.
+        self.enabled = defaults.object(forKey: Keys.enabled) as? Bool ?? false
         self.phrase = defaults.string(forKey: Keys.phrase) ?? "hey gemini"
 
         audio.onPartial = { [weak self] text in
@@ -176,9 +177,9 @@ final class WakeWordListener: ObservableObject {
                 .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
             MainActor.assumeIsolated {
                 guard let self, self.listening, !self.paused else { return }
-                // Category changes are emitted by our own setup. Restarting for them
-                // creates an endless recognizer churn loop; only recover real device changes.
-                guard reason == .newDeviceAvailable || reason == .oldDeviceUnavailable || reason == .override else { return }
+                // Category changes and .override (posted by our own setPreferredInput)
+                // must be ignored; only recover real physical device connect/disconnect.
+                guard reason == .newDeviceAvailable || reason == .oldDeviceUnavailable else { return }
                 self.audio.handleRouteChange()
                 self.scheduleRestart(after: 0.5)
             }
@@ -236,6 +237,7 @@ final class WakeWordListener: ObservableObject {
 
     /// Stop listening entirely (toggle off).
     func stop() {
+        guard listening || paused else { return }
         listening = false
         paused = false
         audio.stop(deactivate: true)

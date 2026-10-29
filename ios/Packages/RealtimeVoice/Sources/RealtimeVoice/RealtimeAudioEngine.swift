@@ -26,6 +26,7 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
     private var onMicChunk: (@Sendable (Data) -> Void)?
     private var onWakeBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
     private var keepRunningForWake = false
+    private var sessionActive = false
     private var tapInstalled = false
     private var tapInputFormat: AVAudioFormat?
     private var captureConverter: AVAudioConverter?
@@ -48,6 +49,40 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
         self.onMicChunk = onMicChunk
 
         try ensureEngineRunningLocked()
+        if !player.isPlaying {
+            player.play()
+        }
+    }
+
+    /// Starts output-only playback (`AVAudioSession.Category.playback`, `.mixWithOthers`)
+    /// without touching `engine.inputNode`. Used when a session starts on a locked phone
+    /// in a pocket and iOS refuses opening an `AVAudioEngine` input recorder from the
+    /// background while `MWDATSpeech` handles speech input on the glasses.
+    public func startPlaybackOnly() throws {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        self.onMicChunk = nil
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        if engine.isRunning {
+            engine.stop()
+        }
+
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try session.setActive(true, options: [])
+        sessionActive = true
+
+        if !playerAttached {
+            engine.attach(player)
+            engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+            playerAttached = true
+        }
+        engine.prepare()
+        try engine.start()
         if !player.isPlaying {
             player.play()
         }
@@ -76,7 +111,12 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
         if engine.isRunning {
             engine.stop()
         }
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if sessionActive {
+            sessionActive = false
+            let session = AVAudioSession.sharedInstance()
+            try? session.setPreferredInput(nil)
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 
     // MARK: - Wake Word Tap Sharing
@@ -112,8 +152,11 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
         if engine.isRunning {
             engine.stop()
         }
-        if deactivate {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if deactivate && sessionActive {
+            sessionActive = false
+            let session = AVAudioSession.sharedInstance()
+            try? session.setPreferredInput(nil)
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
 
@@ -139,21 +182,22 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
         }
 
         let session = AVAudioSession.sharedInstance()
-        // Only configure category/active if needed; ignore redundant errors when
-        // transitioning in the background while locked.
-        try? session.setCategory(
+        try session.setCategory(
             .playAndRecord,
             mode: .default,
             options: [.mixWithOthers, .allowBluetoothHFP, .allowBluetoothA2DP, .defaultToSpeaker]
         )
-        try? session.setActive(true, options: [])
+        try session.setActive(true, options: [])
+        sessionActive = true
 
         let glassesTypes: Set<AVAudioSession.Port> = [.bluetoothHFP, .bluetoothLE, .headsetMic]
         if let glasses = session.availableInputs?.first(where: { input in
             glassesTypes.contains(input.portType)
                 && ["meta", "ray-ban", "rayban"].contains { input.portName.lowercased().contains($0) }
         }) ?? session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
-            try? session.setPreferredInput(glasses)
+            if session.preferredInput?.uid != glasses.uid && session.currentRoute.inputs.first?.uid != glasses.uid {
+                try? session.setPreferredInput(glasses)
+            }
         }
 
         if !playerAttached {

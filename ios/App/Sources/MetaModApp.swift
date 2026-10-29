@@ -54,7 +54,7 @@ struct MetaModApp: App {
         // A saved pairing is only configuration; do not advertise agent controls
         // to Gemini until the phone has a live authenticated socket to Hermes.
         if hermes.isConfigured { hermes.connect() }
-        wakeListener.onWake = {
+        let startVoiceSession: @MainActor () -> Void = {
             router.liveAIWoke = true // surface the Live AI sheet if/when foregrounded
             if session.status != .connecting && session.status != .live {
                 if hermes.antigravityEnabled && hermes.isConfigured && hermes.state == .disconnected { hermes.connect() }
@@ -66,6 +66,12 @@ struct MetaModApp: App {
                     tools: GlassesTools.all + HermesTools.activeTools(antigravityEnabled: agyActive))
             }
         }
+        wakeListener.onWake = startVoiceSession
+        glasses.onVoiceInvocation = {
+            print("[Code] Glasses Voice Invocation ('Hey Meta, start/open Code') received — starting Live AI")
+            fflush(stdout)
+            startVoiceSession()
+        }
         // Voice commands route through Antigravity handoff; late replies get spoken when they land.
         session.toolHandler = { [weak hermes] name, argumentsJSON in
             await hermes?.handleToolCall(name: name, argumentsJSON: argumentsJSON)
@@ -74,7 +80,9 @@ struct MetaModApp: App {
         hermes.onLateReply = { [weak session] reply in
             session?.announce(reply)
         }
-        if wakeListener.enabled { wakeListener.start() }
+        if wakeListener.enabled {
+            wakeListener.start()
+        }
         if ProcessInfo.processInfo.environment["SUPERMETA_AUTOTEST_VOICE"] == "1" {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
