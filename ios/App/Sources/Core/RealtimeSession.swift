@@ -27,6 +27,8 @@ final class RealtimeSession: ObservableObject {
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var eventTask: Task<Void, Never>?
     private var frameTask: Task<Void, Never>?
+    private var audioStartTask: Task<Void, Never>?
+    private var usingConversationSpeechFallback = false
     private var sessionStartedAt: Date = .distantPast
     private var interruptionObserver: NSObjectProtocol?
     private var remoteCommandRegistered = false
@@ -70,8 +72,9 @@ final class RealtimeSession: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 guard self.status == .live || self.status == .connecting else { return }
-                // Ignore any transient interruption within 1.0s of session start.
-                guard Date().timeIntervalSince(self.sessionStartedAt) > 1.0 else { return }
+                // Ignore any transient interruption within 3.5s of session start (e.g. Meta AI
+                // releasing its voice-invocation audio session after "Hey Meta, start Gem").
+                guard Date().timeIntervalSince(self.sessionStartedAt) > 3.5 else { return }
                 if type == .began {
                     print("[SuperMeta] Glasses right-side tap-and-hold / interruption detected — ending Live AI session")
                     fflush(stdout)
@@ -164,21 +167,93 @@ final class RealtimeSession: ObservableObject {
             }
         }
 
-        do {
-            try audio.start(captureSampleRate: 16_000) { [weak self, weak client] chunk in
-                guard self?.suppressMicCapture != true else { return }
-                client?.appendAudio(chunk)
+        client.connect()
+
+        audioStartTask?.cancel()
+        audioStartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let retryDelaysNanos: [UInt64] = [0, 250_000_000, 350_000_000, 500_000_000, 700_000_000, 900_000_000]
+            var lastAudioError: Error?
+            var capturedMicStarted = false
+
+            for delay in retryDelaysNanos {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                guard !Task.isCancelled, self.status == .connecting || self.status == .live else { return }
+                do {
+                    try self.audio.start(captureSampleRate: 16_000) { [weak self, weak client] chunk in
+                        guard self?.suppressMicCapture != true else { return }
+                        client?.appendAudio(chunk)
+                    }
+                    capturedMicStarted = true
+                    break
+                } catch {
+                    lastAudioError = error
+                    print("[SuperMeta] audio.start attempt failed (will retry if attempts remain): \(error.localizedDescription)")
+                    fflush(stdout)
+                }
             }
-            client.connect()
-            if injectFrames { startFrameInjection() }
-        } catch {
-            endWithError("Audio error: \(error.localizedDescription)")
+
+            guard !Task.isCancelled, self.status == .connecting || self.status == .live else { return }
+
+            if capturedMicStarted {
+                self.usingConversationSpeechFallback = false
+                self.sessionStartedAt = Date()
+                self.audio.playCue(rising: true)
+                if injectFrames { self.startFrameInjection() }
+                return
+            }
+
+            // Locked-phone pocket fallback (BirdSpotter FailoverAudioSource pattern):
+            // When AVAudioSession was inactive while idle (so the orange mic indicator stayed off)
+            // and the phone is locked, iOS may refuse opening AVAudioEngine.inputNode from the
+            // background. Fall back to output-only .playback + DAT on-glasses speech recognition.
+            print("[SuperMeta] Falling back to playback-only + MWDATSpeech conversation input on locked phone")
+            fflush(stdout)
+            do {
+                try self.audio.startPlaybackOnly()
+                self.sessionStartedAt = Date()
+                self.audio.playCue(rising: true)
+                if let glasses = self.glasses {
+                    let startedSpeech = await glasses.startConversationSpeech(
+                        onPartial: { [weak self] partial in
+                            Task { @MainActor [weak self] in
+                                self?.userLine = partial
+                            }
+                        },
+                        onFinal: { [weak self] utterance in
+                            Task { @MainActor [weak self] in
+                                guard let self, self.status == .live || self.status == .connecting else { return }
+                                self.userLine = utterance
+                                print("[SuperMeta] MWDATSpeech conversation utterance: \(utterance)")
+                                fflush(stdout)
+                                self.client?.sendText(utterance)
+                            }
+                        }
+                    )
+                    self.usingConversationSpeechFallback = startedSpeech
+                    if startedSpeech {
+                        if injectFrames { self.startFrameInjection() }
+                        return
+                    }
+                }
+            } catch {
+                lastAudioError = error
+            }
+
+            self.endWithError("Audio error: \(lastAudioError?.localizedDescription ?? "Microphone unavailable")")
         }
     }
 
     func stop() {
+        audioStartTask?.cancel(); audioStartTask = nil
         frameTask?.cancel(); frameTask = nil
         eventTask?.cancel(); eventTask = nil
+        if usingConversationSpeechFallback, let glasses {
+            usingConversationSpeechFallback = false
+            Task { await glasses.stopConversationSpeech() }
+        }
         if cameraStartedByUser, let glasses {
             cameraStartedByUser = false
             Task { await glasses.stopStreaming() }
@@ -475,9 +550,14 @@ final class RealtimeSession: ObservableObject {
     /// A failed connection must release the microphone for the wake listener.
     /// Otherwise an invalid Live setup leaves "Hey Gemini" permanently paused.
     private func endWithError(_ message: String) {
+        audioStartTask?.cancel(); audioStartTask = nil
         frameTask?.cancel(); frameTask = nil
         eventTask?.cancel(); eventTask = nil
         deactivateRemoteControlForSession()
+        if usingConversationSpeechFallback, let glasses {
+            usingConversationSpeechFallback = false
+            Task { await glasses.stopConversationSpeech() }
+        }
         if cameraStartedByUser, let glasses {
             cameraStartedByUser = false
             Task { await glasses.stopStreaming() }

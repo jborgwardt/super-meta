@@ -21,7 +21,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>CFBundleDisplayName</key>
-	<string>Super Meta</string>
+	<string>Code</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -62,7 +62,7 @@
 		<string>com.meta.ar.wearable</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Super Meta uses the local network for high-bandwidth streaming from your glasses.</string>
+	<string>Code uses the local network for high-bandwidth streaming from your glasses.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_bonjour._tcp</string>
@@ -100,16 +100,16 @@
 		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Super Meta connects to your smart glasses over Bluetooth.</string>
+	<string>Code connects to your smart glasses over Bluetooth.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Super Meta uses the camera to scan your gateway's pairing QR code.</string>
+	<string>Code uses the camera to scan your gateway's pairing QR code.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Super Meta uses the microphone for real-time voice conversations through your glasses.</string>
+	<string>Code uses the microphone for real-time voice conversations through your glasses.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Super Meta saves photos captured from your glasses to your library.</string>
+	<string>Code saves photos captured from your glasses to your library.</string>
 	<key>NSSiriUsageDescription</key>
-	<string>Super Meta uses Siri so you can trigger vision recognition hands-free.</string>
+	<string>Code uses Siri so you can trigger vision recognition hands-free.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Super Meta listens for your wake phrase so you can start Live AI hands-free through your glasses.</string>
+	<string>Code listens for your wake phrase so you can start Live AI hands-free through your glasses.</string>
 </dict>
 </plist>
