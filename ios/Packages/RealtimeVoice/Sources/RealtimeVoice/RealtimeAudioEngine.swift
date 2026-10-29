@@ -72,7 +72,7 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
         }
 
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try session.setCategory(.playback, mode: .default, options: [.mixWithOthers, .allowBluetoothA2DP])
         try session.setActive(true, options: [])
         sessionActive = true
 
@@ -99,7 +99,15 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
 
         player.stop()
         if keepRunningForWake && engine.isRunning {
-            // Keep engine & AVAudioSession alive so locked-screen wake listening never drops.
+            // Keep engine & AVAudioSession alive so locked-screen wake listening never drops,
+            // while releasing Bluetooth HFP so the glasses return to A2DP media profile.
+            let session = AVAudioSession.sharedInstance()
+            try? session.setPreferredInput(nil)
+            try? session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.mixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker]
+            )
             player.play()
             return
         }
@@ -177,27 +185,44 @@ public final class RealtimeAudioEngine: @unchecked Sendable {
     // MARK: - Core Engine Setup
 
     private func ensureEngineRunningLocked() throws {
-        if engine.isRunning && tapInstalled {
-            return
+        let wantsLiveMic = (onMicChunk != nil)
+        let session = AVAudioSession.sharedInstance()
+        if wantsLiveMic {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.mixWithOthers, .allowBluetoothHFP, .allowBluetoothA2DP, .defaultToSpeaker]
+            )
+            try session.setActive(true, options: [])
+            sessionActive = true
+
+            let glassesTypes: Set<AVAudioSession.Port> = [.bluetoothHFP, .bluetoothLE, .headsetMic]
+            if let glasses = session.availableInputs?.first(where: { input in
+                glassesTypes.contains(input.portType)
+                    && ["meta", "ray-ban", "rayban"].contains { input.portName.lowercased().contains($0) }
+            }) ?? session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
+                if session.preferredInput?.uid != glasses.uid && session.currentRoute.inputs.first?.uid != glasses.uid {
+                    try? session.setPreferredInput(glasses)
+                }
+            }
+        } else {
+            // Wake-word standby: match BirdSpotter's MicrophoneCapture (.allowBluetoothA2DP and
+            // never .allowBluetoothHFP) so the phone mic listens for "Hey Gemini" while keeping
+            // the glasses on A2DP and out of Bluetooth HFP call mode.
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.mixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker]
+            )
+            try session.setActive(true, options: [])
+            sessionActive = true
+            if session.preferredInput != nil {
+                try? session.setPreferredInput(nil)
+            }
         }
 
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(
-            .playAndRecord,
-            mode: .default,
-            options: [.mixWithOthers, .allowBluetoothHFP, .allowBluetoothA2DP, .defaultToSpeaker]
-        )
-        try session.setActive(true, options: [])
-        sessionActive = true
-
-        let glassesTypes: Set<AVAudioSession.Port> = [.bluetoothHFP, .bluetoothLE, .headsetMic]
-        if let glasses = session.availableInputs?.first(where: { input in
-            glassesTypes.contains(input.portType)
-                && ["meta", "ray-ban", "rayban"].contains { input.portName.lowercased().contains($0) }
-        }) ?? session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
-            if session.preferredInput?.uid != glasses.uid && session.currentRoute.inputs.first?.uid != glasses.uid {
-                try? session.setPreferredInput(glasses)
-            }
+        if engine.isRunning && tapInstalled {
+            return
         }
 
         if !playerAttached {

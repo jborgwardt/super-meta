@@ -112,7 +112,16 @@ final class RealtimeSession: ObservableObject {
     }
 
     private func deactivateRemoteControlForSession() {
+        let cc = MPRemoteCommandCenter.shared()
+        if remoteCommandRegistered {
+            remoteCommandRegistered = false
+            for cmd in [cc.togglePlayPauseCommand, cc.pauseCommand, cc.stopCommand, cc.playCommand, cc.nextTrackCommand] {
+                cmd.isEnabled = false
+                cmd.removeTarget(nil)
+            }
+        }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        UIApplication.shared.endReceivingRemoteControlEvents()
     }
 
     /// Starts a session. Camera stays off unless `injectFrames` is true or requested by voice.
@@ -172,7 +181,11 @@ final class RealtimeSession: ObservableObject {
         audioStartTask?.cancel()
         audioStartTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let retryDelaysNanos: [UInt64] = [0, 250_000_000, 350_000_000, 500_000_000, 700_000_000, 900_000_000]
+            let isLockedOrBackgrounded = (UIApplication.shared.applicationState != .active)
+                || !UIApplication.shared.isProtectedDataAvailable
+            let retryDelaysNanos: [UInt64] = isLockedOrBackgrounded
+                ? [0]
+                : [0, 250_000_000, 350_000_000, 500_000_000, 700_000_000, 900_000_000]
             var lastAudioError: Error?
             var capturedMicStarted = false
 
@@ -190,7 +203,7 @@ final class RealtimeSession: ObservableObject {
                     break
                 } catch {
                     lastAudioError = error
-                    print("[SuperMeta] audio.start attempt failed (will retry if attempts remain): \(error.localizedDescription)")
+                    print("[SuperMeta] audio.start attempt failed (lockedOrBg=\(isLockedOrBackgrounded)): \(error.localizedDescription)")
                     fflush(stdout)
                 }
             }

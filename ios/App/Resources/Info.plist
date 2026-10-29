@@ -56,6 +56,8 @@
 		<string>bluetooth-central</string>
 		<string>bluetooth-peripheral</string>
 		<string>external-accessory</string>
+		<string>fetch</string>
+		<string>processing</string>
 	</array>
 	<key>UISupportedExternalAccessoryProtocols</key>
 	<array>

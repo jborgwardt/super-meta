@@ -13,6 +13,7 @@ private final class WakeAudioEngine: @unchecked Sendable {
     private lazy var recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    private var rotationTimer: DispatchSourceTimer?
     private var recognitionGeneration = 0
 
     /// Partial transcript text; fires on the recognition thread.
@@ -74,10 +75,20 @@ private final class WakeAudioEngine: @unchecked Sendable {
             if let result { self?.onPartial?(result.bestTranscription.formattedString) }
             if error != nil || (result?.isFinal ?? false) { self?.onEnd?() }
         }
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 52.0)
+        timer.setEventHandler { [weak self] in
+            guard let self, self.recognitionGeneration == generation else { return }
+            self._start(contextual)
+        }
+        timer.resume()
+        rotationTimer = timer
     }
 
     private func _pause(invalidateRecognition: Bool = true) {
         if invalidateRecognition { recognitionGeneration &+= 1 }
+        rotationTimer?.cancel(); rotationTimer = nil
         RealtimeAudioEngine.shared.pauseWakeTap()
         task?.cancel(); task = nil
         request?.endAudio(); request = nil
@@ -85,6 +96,7 @@ private final class WakeAudioEngine: @unchecked Sendable {
 
     private func _stop(deactivate: Bool, invalidateRecognition: Bool = true) {
         if invalidateRecognition { recognitionGeneration &+= 1 }
+        rotationTimer?.cancel(); rotationTimer = nil
         task?.cancel(); task = nil
         request?.endAudio(); request = nil
         RealtimeAudioEngine.shared.stopWakeTap(deactivate: deactivate)
