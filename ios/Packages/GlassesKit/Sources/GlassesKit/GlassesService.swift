@@ -639,7 +639,19 @@ public final class GlassesService: ObservableObject {
                     return false
                 }
             }
-            let session = try await ensureDeviceSessionStarted()
+            // The DeviceSession cannot start while VoiceInvocationsStream holds
+            // the glasses lease — on a locked Hey Meta launch that lease is live.
+            // Close it for the start, like BirdSpotter's withChannelClosed; the
+            // monitor reopens it after the session ends and the hold releases.
+            var startedSession: DeviceSession!
+            await withVoiceChannelClosed {
+                startedSession = try? await self.ensureDeviceSessionStarted()
+            }
+            guard let session = startedSession else {
+                Self.appendDebugLog("startConversationSpeech failed: device session would not start")
+                wantsConversationSpeech = false
+                return false
+            }
             let activeSpeech: MWDATSpeech.Speech
             if let existing = speech {
                 activeSpeech = existing
