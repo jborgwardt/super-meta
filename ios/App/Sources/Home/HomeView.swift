@@ -8,6 +8,9 @@ import Inject
 /// stat cards, and grouped feature sections.
 struct HomeView: View {
     @EnvironmentObject private var glasses: GlassesService
+    @EnvironmentObject private var providers: ProviderManager
+    @EnvironmentObject private var hermes: HermesService
+    @EnvironmentObject private var session: RealtimeSession
     @Query(sort: \VisionRecord.createdAt, order: .reverse) private var records: [VisionRecord]
     @State private var showSettings = false
     @State private var showConnect = false
@@ -33,12 +36,36 @@ struct HomeView: View {
 
                     statRow
 
-                    section("Connect") {
+                    section("Glasses Camera & Vision") {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: Theme.Spacing.md) {
+                                NavigationLink { QuickVisionView() } label: {
+                                    visionTile("Quick Vision", "Snap & recognize", "camera.viewfinder", Theme.Palette.ink)
+                                }.buttonStyle(.plain)
+                                NavigationLink { VisionRecognitionView() } label: {
+                                    visionTile("Vision Chat", "Ask camera anything", "bubble.left.and.text.bubble.right", Theme.Palette.positive)
+                                }.buttonStyle(.plain)
+                                NavigationLink { LeanEatView() } label: {
+                                    visionTile("LeanEat", "Meal nutrition", "leaf", Theme.Palette.live)
+                                }.buttonStyle(.plain)
+                                Button { showConnect = true } label: {
+                                    visionTile("Connect Glasses", glasses.hasActiveDevice ? "Connected" : "Link Ray-Ban Meta", "eyeglasses", Theme.Palette.accent)
+                                }.buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, Theme.Spacing.lg)
+                        }
+                        .padding(.horizontal, -Theme.Spacing.lg)
+                    }
+
+                    section("Antigravity & Tools") {
                         VStack(spacing: Theme.Spacing.md) {
                             NavigationLink { HermesView() } label: {
-                                wideCard("Hermes", "Command your agent — tasks, messages, status", "command", Theme.Palette.ink)
+                                antigravityCard
                             }.buttonStyle(.plain)
                             HStack(spacing: Theme.Spacing.md) {
+                                NavigationLink { LiveTranslateView() } label: {
+                                    tile("Live Translate", "Real-time speech", "waveform.badge.mic", Theme.Palette.ink)
+                                }.buttonStyle(.plain)
                                 NavigationLink { GatewayView() } label: {
                                     tile("Agent Link", "Camera node", "antenna.radiowaves.left.and.right", Theme.Palette.positive)
                                 }.buttonStyle(.plain)
@@ -94,18 +121,18 @@ struct HomeView: View {
     }
 
     private var connectionChip: some View {
-        HStack(spacing: 6) {
-            Circle().fill(dotColor).frame(width: 6, height: 6)
-            Text(connectionText).font(.system(size: 12)).foregroundStyle(Theme.Palette.textSecondary)
-            if glasses.isAvailable && glasses.registration != .registered {
-                Button(glasses.registration == .registering ? "Connecting…" : "Connect") {
-                    showConnect = true
-                }
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.Palette.textPrimary)
-                .disabled(glasses.registration == .registering)
+        Button {
+            showConnect = true
+        } label: {
+            HStack(spacing: 6) {
+                Circle().fill(dotColor).frame(width: 6, height: 6)
+                Text(connectionText).font(.system(size: 12)).foregroundStyle(Theme.Palette.textSecondary)
+                Text(glasses.registration == .registered ? "· Manage" : "· Connect")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.Palette.textPrimary)
             }
         }
+        .buttonStyle(.plain)
     }
 
     private var dotColor: Color {
@@ -132,20 +159,28 @@ struct HomeView: View {
         GlassCard {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 HStack(alignment: .top) {
-                    StatusBadge(glasses.hasActiveDevice ? "Live" : "Standby", color: dotColor)
+                    StatusBadge(
+                        session.status == .live ? "Live Session" : (glasses.hasActiveDevice ? "Glasses Ready" : "Vertex AI Ultra"),
+                        color: session.status == .live ? Theme.Palette.live : Theme.Palette.positive
+                    )
                     Spacer()
                     heroGlyph
                 }
-                Spacer(minLength: Theme.Spacing.md)
+                Spacer(minLength: Theme.Spacing.sm)
                 Text("Live AI")
                     .font(.system(size: 30, weight: .bold))
                     .foregroundStyle(Theme.Palette.textPrimary)
-                Text("Talk to your glasses in real time — it sees and hears with you.")
+                Text("Real-time voice & on-demand vision powered by Gemini 3.8 Live on Google AI Ultra — with direct lab-exec code execution\(hermes.antigravityEnabled ? " + Antigravity (\(hermes.selectedInstance.title))" : "").")
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.Palette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: Theme.Spacing.xs) {
+                    pillBadge(providers.realtimeModel == "gemini-3.8-live" ? "Gemini 3.8 Live" : "Gemini 2.5 Live", icon: "sparkles")
+                    pillBadge("Voice · \(providers.realtimeVoice)", icon: "waveform")
+                    pillBadge(hermes.antigravityEnabled ? "lab-exec + \(hermes.selectedInstance.shortLabel)" : "lab-exec", icon: "terminal")
+                }
                 HStack(spacing: Theme.Spacing.sm) {
-                    Text("Start Live AI")
+                    Text(session.status == .live ? "Open Live Session" : "Start Live AI")
                         .font(.system(size: 15, weight: .semibold))
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 13, weight: .bold))
@@ -156,8 +191,51 @@ struct HomeView: View {
                 .background(Capsule().fill(Theme.Palette.ink))
                 .padding(.top, Theme.Spacing.xs)
             }
-            .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 200, alignment: .topLeading)
         }
+    }
+
+    private func pillBadge(_ label: String, icon: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(label)
+                .font(Theme.Font.readout(10))
+                .lineLimit(1)
+        }
+        .foregroundStyle(Theme.Palette.textSecondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(Theme.Palette.surfaceHigh))
+    }
+
+    private var antigravityCard: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            iconBadge("sparkles.rectangle.stack.fill", Theme.Palette.ink)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Antigravity")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                    Circle()
+                        .fill(hermes.state == .connected ? Theme.Palette.positive : Theme.Palette.textMuted)
+                        .frame(width: 6, height: 6)
+                    Text(hermes.selectedInstance.title)
+                        .font(Theme.Font.readout(11))
+                        .foregroundStyle(Theme.Palette.positive)
+                        .lineLimit(1)
+                }
+                Text("Remote coding agent · \(hermes.selectedInstance.subtitle)")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.Palette.textMuted)
+        }
+        .modifier(CardSurface())
     }
 
     /// The glasses' latest camera frame if we have one, otherwise a mic glyph.
@@ -183,12 +261,15 @@ struct HomeView: View {
         HStack(spacing: Theme.Spacing.md) {
             StatCard(value: "\(records.count)", label: "Records", systemImage: "square.stack.3d.up")
             StatCard(value: "\(weekCount)", label: "This week", systemImage: "calendar")
-            StatCard(
-                value: connectionValue,
-                label: "Glasses",
-                tint: glasses.hasActiveDevice ? Theme.Palette.positive : Theme.Palette.textSecondary,
-                systemImage: "eyeglasses"
-            )
+            Button { showConnect = true } label: {
+                StatCard(
+                    value: connectionValue,
+                    label: "Glasses",
+                    tint: glasses.hasActiveDevice ? Theme.Palette.positive : Theme.Palette.textSecondary,
+                    systemImage: "eyeglasses"
+                )
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -235,6 +316,17 @@ struct HomeView: View {
             Text(subtitle).font(.system(size: 12)).foregroundStyle(Theme.Palette.textSecondary)
         }
         .frame(maxWidth: .infinity, minHeight: 118, alignment: .topLeading)
+        .modifier(CardSurface())
+    }
+
+    private func visionTile(_ title: String, _ subtitle: String, _ icon: String, _ tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            iconBadge(icon, tint)
+            Spacer()
+            Text(title).font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.Palette.textPrimary)
+            Text(subtitle).font(.system(size: 12)).foregroundStyle(Theme.Palette.textSecondary)
+        }
+        .frame(width: 150, height: 118, alignment: .topLeading)
         .modifier(CardSurface())
     }
 

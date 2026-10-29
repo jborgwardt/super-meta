@@ -57,22 +57,31 @@ struct MetaModApp: App {
         wakeListener.onWake = {
             router.liveAIWoke = true // surface the Live AI sheet if/when foregrounded
             if session.status != .connecting && session.status != .live {
-                let hermesReady = hermes.state == .connected
+                if hermes.antigravityEnabled && hermes.isConfigured && hermes.state == .disconnected { hermes.connect() }
+                let agyActive = hermes.antigravityEnabled && hermes.isConfigured
                 session.start(
-                    instructions: LiveAIMode.standard.instructions + GlassesTools.instructionsAddendum + (hermesReady ? HermesTools.instructionsAddendum : HermesTools.unavailableInstructions),
+                    instructions: LiveAIMode.standard.instructions + GlassesTools.instructionsAddendum + HermesTools.instructionsAddendum(for: hermes.selectedInstance, antigravityEnabled: agyActive),
                     providers: providers, glasses: glasses,
-                    injectFrames: glasses.isAvailable,
-                    tools: GlassesTools.all + (hermesReady ? HermesTools.all : []))
+                    injectFrames: false,
+                    tools: GlassesTools.all + HermesTools.activeTools(antigravityEnabled: agyActive))
             }
         }
-        // Voice commands route through hermes; late replies get spoken when they land.
+        // Voice commands route through Antigravity handoff; late replies get spoken when they land.
         session.toolHandler = { [weak hermes] name, argumentsJSON in
             await hermes?.handleToolCall(name: name, argumentsJSON: argumentsJSON)
-                ?? #"{"error":"Hermes is not available"}"#
+                ?? #"{"error":"Antigravity bridge is not available"}"#
         }
         hermes.onLateReply = { [weak session] reply in
-            session?.announce("Hermes has finished working. Relay this answer to the user: \(reply)")
+            session?.announce(reply)
         }
         if wakeListener.enabled { wakeListener.start() }
+        if ProcessInfo.processInfo.environment["SUPERMETA_AUTOTEST_VOICE"] == "1" {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                print("[SuperMeta] Autotest: starting Live session via onWake()")
+                fflush(stdout)
+                wakeListener.onWake?()
+            }
+        }
     }
 }

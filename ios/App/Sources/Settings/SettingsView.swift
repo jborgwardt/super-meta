@@ -8,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject private var providers: ProviderManager
     @EnvironmentObject private var glasses: GlassesService
     @EnvironmentObject private var wakeListener: WakeWordListener
+    @EnvironmentObject private var hermes: HermesService
     @Environment(\.dismiss) private var dismiss
     @ObserveInjection var inject
 
@@ -15,10 +16,10 @@ struct SettingsView: View {
     var showsDoneButton = true
 
     struct ModelOption { let id: String; let title: String; let subtitle: String }
-    /// Selectable Gemini Live models.
+    /// Selectable Gemini Live models on Vertex AI (Google AI Ultra relay).
     static let liveModels: [ModelOption] = [
-        .init(id: "gemini-3.1-flash-live-preview", title: "Gemini Live · Flash 3.1", subtitle: "Current low-latency voice model (recommended)"),
-        .init(id: "gemini-2.5-flash-native-audio-preview-12-2025", title: "Gemini Live · Native Audio", subtitle: "Natural expressive voice · preview")
+        .init(id: "gemini-3.8-live", title: "Gemini Live · 3.8 (Vertex Ultra)", subtitle: "Flagship low-latency voice & vision on Google AI Ultra"),
+        .init(id: "gemini-live-2.5-flash-native-audio", title: "Gemini Live · 2.5 Flash Native Audio", subtitle: "Vertex AI native audio model")
     ]
     /// On-device Gemma models — shown disabled (local support coming soon).
     static let gemmaModels: [ModelOption] = [
@@ -30,6 +31,7 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 deviceSection
+                antigravitySection
                 providerSection
                 voiceSection
                 keysSection
@@ -68,14 +70,60 @@ struct SettingsView: View {
         }
     }
 
-    private var deviceSection: some View {
+    private var antigravitySection: some View {
         Section {
             HStack {
-                Text("Glasses")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Lab Exec (Direct)")
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                    Text("exec.heil.haus · vps, mac, panzer, pi, pihole, borgwardt, ha")
+                        .font(Theme.Font.readout(11))
+                        .foregroundStyle(Theme.Palette.textMuted)
+                }
                 Spacer()
-                StatusBadge(glassesStatus.0, color: glassesStatus.1)
+                StatusBadge("active", color: Theme.Palette.positive)
             }
-        } header: { sectionHeader("Device") }
+
+            Toggle("Enable Antigravity Handoff (Optional)", isOn: $hermes.antigravityEnabled)
+                .tint(Theme.Palette.accent)
+
+            if hermes.antigravityEnabled {
+                ForEach(AntigravityInstance.allCases) { instance in
+                    Button {
+                        hermes.selectedInstance = instance
+                    } label: {
+                        modelRow(
+                            instance.title,
+                            instance.subtitle,
+                            selected: hermes.selectedInstance == instance,
+                            trailing: nil
+                        )
+                    }
+                }
+            }
+        } header: { sectionHeader("Code Execution · Lab Exec & Antigravity") } footer: {
+            Text("Gemini Live can always execute code, shell commands, and file reads/writes directly via lab-exec across your lab hosts. Enable Antigravity Handoff if you also want optional delegation to a remote Antigravity IDE instance.")
+                .foregroundStyle(Theme.Palette.textMuted)
+        }
+        .listRowBackground(Theme.Palette.surface)
+        .foregroundStyle(Theme.Palette.textPrimary)
+    }
+
+    private var deviceSection: some View {
+        Section {
+            NavigationLink {
+                ConnectGlassesView().environmentObject(glasses)
+            } label: {
+                HStack {
+                    Text("Glasses")
+                    Spacer()
+                    StatusBadge(glassesStatus.0, color: glassesStatus.1)
+                }
+            }
+        } header: { sectionHeader("Device") } footer: {
+            Text("Tap to link or manage your Ray-Ban Meta glasses. During Live AI, ask Gemini to turn the camera on or off, look at what's in front of you, or take a photo.")
+                .foregroundStyle(Theme.Palette.textMuted)
+        }
         .listRowBackground(Theme.Palette.surface)
         .foregroundStyle(Theme.Palette.textPrimary)
     }
@@ -134,17 +182,24 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.Palette.textMuted)
             }
 
+            Picker("Voice Persona", selection: $providers.realtimeVoice) {
+                ForEach(ProviderManager.availableVoices) { voice in
+                    Text("\(voice.name) · \(voice.tagline)").tag(voice.id)
+                }
+            }
+            .tint(Theme.Palette.accent)
+
             Toggle("Wake word", isOn: $wakeListener.enabled)
                 .tint(Theme.Palette.accent)
 
             if wakeListener.enabled {
-                TextField("Wake phrase, e.g. hey neo", text: $wakeListener.phrase)
+                TextField("Wake phrase, e.g. hey gemini", text: $wakeListener.phrase)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .foregroundStyle(Theme.Palette.textPrimary)
             }
-        } header: { sectionHeader("Voice") } footer: {
-            Text("Say the wake phrase to start Live AI hands-free on your selected model — through the glasses when connected, even with the phone locked. Keeps the mic active; uses more battery. Camera context pauses while the app is in the background.")
+        } header: { sectionHeader("Voice & Live AI") } footer: {
+            Text("Say \"Hey Gemini\" or \"Hey Antigravity\" to start Live AI hands-free on your selected model — through the glasses when connected, even with the phone locked. Camera stays off unless you ask.")
                 .foregroundStyle(Theme.Palette.textMuted)
         }
         .listRowBackground(Theme.Palette.surface)
@@ -178,7 +233,10 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         Section {
-            HStack { Text("Version"); Spacer(); Text("0.0.1").foregroundStyle(Theme.Palette.textSecondary) }
+            HStack { Text("Edition"); Spacer(); Text("Super Meta · Antigravity Ultra").foregroundStyle(Theme.Palette.textSecondary) }
+            HStack { Text("Live Relay"); Spacer(); Text("Vertex AI (100.64.0.4:8796)").font(Theme.Font.readout(12)).foregroundStyle(Theme.Palette.textSecondary) }
+            HStack { Text("Antigravity Bridge"); Spacer(); Text("100.64.0.18:7195").font(Theme.Font.readout(12)).foregroundStyle(Theme.Palette.textSecondary) }
+            HStack { Text("Version"); Spacer(); Text("2.0.0").foregroundStyle(Theme.Palette.textSecondary) }
         } header: { sectionHeader("About") }
         .listRowBackground(Theme.Palette.surface)
         .foregroundStyle(Theme.Palette.textPrimary)

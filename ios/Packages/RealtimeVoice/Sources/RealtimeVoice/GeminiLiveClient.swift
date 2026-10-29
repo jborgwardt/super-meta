@@ -10,10 +10,14 @@ private let log = Logger(subsystem: "com.priyanshu.metamod", category: "GeminiLi
 /// Auth: the API key is passed as the `?key=` query param (works for AIza… keys and
 /// the newer AQ… AI Studio keys alike).
 public final class GeminiLiveClient: RealtimeClient, @unchecked Sendable {
+    public static let defaultRelayURL = "ws://100.64.0.4:8796/ws/live"
+
     private let apiKey: String
     private let config: RealtimeConfig
+    private let baseURL: String
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
+    private var pingTask: Task<Void, Never>?
     private let sendLock = NSLock()
     private var setupComplete = false
     private var pendingMessages: [[String: Any]] = []
@@ -22,11 +26,17 @@ public final class GeminiLiveClient: RealtimeClient, @unchecked Sendable {
     private var continuation: AsyncStream<RealtimeEvent>.Continuation?
     public let events: AsyncStream<RealtimeEvent>
 
-    private static let geminiVoices: Set<String> = ["Aoede", "Charon", "Fenrir", "Kore", "Puck"]
+    private static let geminiVoices: Set<String> = ["Aoede", "Charon", "Fenrir", "Kore", "Puck", "Zephyr", "Orus", "Leda"]
 
-    public init(apiKey: String, config: RealtimeConfig = .init(), session: URLSession = .shared) {
+    public init(
+        apiKey: String,
+        config: RealtimeConfig = .init(),
+        baseURL: String = GeminiLiveClient.defaultRelayURL,
+        session: URLSession = .shared
+    ) {
         self.apiKey = apiKey
         self.config = config
+        self.baseURL = baseURL
         self.session = session
         var cont: AsyncStream<RealtimeEvent>.Continuation!
         self.events = AsyncStream { cont = $0 }
@@ -34,19 +44,25 @@ public final class GeminiLiveClient: RealtimeClient, @unchecked Sendable {
     }
 
     public func connect() {
-        let base = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         let encoded = apiKey.addingPercentEncoding(withAllowedCharacters: .urlQueryValueAllowed) ?? apiKey
-        guard let url = URL(string: "\(base)?key=\(encoded)") else {
+        let separator = baseURL.contains("?") ? "&" : "?"
+        guard let url = URL(string: "\(baseURL)\(separator)key=\(encoded)") else {
             continuation?.yield(.error("Invalid Gemini Live URL")); return
         }
-        let task = session.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+        let task = session.webSocketTask(with: request)
         self.task = task
         task.resume()
+        startPingLoop()
         receiveLoop()
         sendSetup()
     }
 
     public func disconnect() {
+        pingTask?.cancel()
+        pingTask = nil
         sendLock.lock()
         setupComplete = false
         pendingMessages.removeAll()
@@ -54,6 +70,17 @@ public final class GeminiLiveClient: RealtimeClient, @unchecked Sendable {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         continuation?.finish()
+    }
+
+    private func startPingLoop() {
+        pingTask?.cancel()
+        pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                if Task.isCancelled { break }
+                self?.task?.sendPing { _ in }
+            }
+        }
     }
 
     // MARK: Outgoing
@@ -105,7 +132,9 @@ public final class GeminiLiveClient: RealtimeClient, @unchecked Sendable {
 
     public func sendImage(_ jpeg: Data, note: String = "") {
         sendAfterSetup(Self.imageMessage(jpeg))
-        if !note.isEmpty { sendText(note) }
+        if !note.isEmpty {
+            sendAfterSetup(Self.clientContentImageMessage(jpeg, note: note))
+        }
     }
 
     public func sendText(_ text: String) {
@@ -133,6 +162,24 @@ public final class GeminiLiveClient: RealtimeClient, @unchecked Sendable {
             "mimeType": "image/jpeg",
             "data": jpeg.base64EncodedString()
         ]]]
+    }
+
+    static func clientContentImageMessage(_ jpeg: Data, note: String) -> [String: Any] {
+        [
+            "clientContent": [
+                "turns": [[
+                    "role": "user",
+                    "parts": [
+                        ["inlineData": [
+                            "mimeType": "image/jpeg",
+                            "data": jpeg.base64EncodedString()
+                        ]],
+                        ["text": note]
+                    ]
+                ]],
+                "turnComplete": true
+            ]
+        ]
     }
 
     static func textMessage(_ text: String) -> [String: Any] {
@@ -240,7 +287,9 @@ public final class GeminiLiveClient: RealtimeClient, @unchecked Sendable {
                    let b64 = inline["data"] as? String, let audio = Data(base64Encoded: b64) {
                     continuation?.yield(.assistantAudioDelta(audio))
                 }
-                if let text = part["text"] as? String, !text.isEmpty {
+                if let text = part["text"] as? String,
+                   !text.isEmpty,
+                   (part["thought"] as? Bool) != true {
                     continuation?.yield(.assistantTextDelta(text))
                 }
             }

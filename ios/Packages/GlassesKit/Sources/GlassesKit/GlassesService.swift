@@ -84,6 +84,7 @@ public final class GlassesService: ObservableObject {
     private var deviceStateSession: DeviceStateSession?
     private var deviceMonitorTask: Task<Void, Never>?
     private var isProcessingFrame = false
+    private var frameSequence: UInt64 = 0
     private var photoContinuation: CheckedContinuation<Data, Error>?
 
     /// True while the user intends to be streaming. Drives automatic resume when the
@@ -282,6 +283,7 @@ public final class GlassesService: ObservableObject {
         // Mark intent up front so an interrupted stream auto-resumes even if the
         // device isn't ready yet (session parks in `waitingForDevice`).
         wantsStreaming = true
+        lastError = nil
         do {
             let status = try await wearables.checkPermissionStatus(Permission.camera)
             if status != .granted {
@@ -289,15 +291,50 @@ public final class GlassesService: ObservableObject {
                 guard requested == .granted else { setError("Camera permission denied"); return }
             }
             await streamSession.start()
+            updateStreamState(streamSession.state)
         } catch {
             setError("Could not start streaming: \(error.localizedDescription)")
         }
+    }
+
+    /// Waits up to `timeout` seconds for the glasses camera stream to reach `.streaming`
+    /// (since `StreamSession.start()` transitions through `.starting`/`.waitingForDevice` asynchronously).
+    public func waitForStreaming(timeout: TimeInterval = 5.0) async -> Bool {
+        guard let streamSession else { return false }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            updateStreamState(streamSession.state)
+            if streamState == .streaming || latestFrame != nil {
+                return true
+            }
+            if case .error = streamState {
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        updateStreamState(streamSession.state)
+        return streamState == .streaming || latestFrame != nil
+    }
+
+    /// Waits for a fresh camera frame to arrive on the active stream.
+    public func waitForFreshFrame(maxWidth: CGFloat = 1280, quality: CGFloat = 0.75, timeout: TimeInterval = 4.5) async -> Data? {
+        let initialSeq = frameSequence
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if frameSequence > initialSeq, let jpeg = currentFrameJPEG(maxWidth: maxWidth, quality: quality) {
+                return jpeg
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return currentFrameJPEG(maxWidth: maxWidth, quality: quality)
     }
 
     public func stopStreaming() async {
         // Explicit stop clears intent so we don't auto-resume behind the user's back.
         wantsStreaming = false
         await streamSession?.stop()
+        streamState = .stopped
+        latestFrame = nil
     }
 
     private func observeSession(_ session: StreamSession) {
@@ -309,7 +346,10 @@ public final class GlassesService: ObservableObject {
                 guard let self, !self.isProcessingFrame else { return }
                 self.isProcessingFrame = true
                 defer { self.isProcessingFrame = false }
-                if let image = frame.makeUIImage() { self.latestFrame = image }
+                if let image = frame.makeUIImage() {
+                    self.latestFrame = image
+                    self.frameSequence &+= 1
+                }
             }
         }
         errorToken = session.errorPublisher.listen { [weak self] error in

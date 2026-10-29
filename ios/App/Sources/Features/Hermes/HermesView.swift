@@ -3,9 +3,9 @@ import DesignSystem
 import AgentGateway
 import Inject
 
-/// Command center for the OpenClaw/Hermes agent: chat with streamed replies,
-/// running sessions at a glance, and quick actions to spawn tasks or send
-/// messages through the agent's channels.
+/// Command center for the remote Antigravity coding agent: switch between remote
+/// instances (`desktop-void-mars`, `justins-macbook-pro-local-solar-axis`, `VPS (100.64.0.18)`),
+/// inspect active sessions, and dispatch coding tasks or messages.
 struct HermesView: View {
     @EnvironmentObject private var hermes: HermesService
     @EnvironmentObject private var gateway: GatewayService
@@ -16,12 +16,17 @@ struct HermesView: View {
     @State private var showPairing = false
     @State private var showTaskSheet = false
     @State private var showMessageSheet = false
+    @State private var showInstanceSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
                 .padding(.horizontal, Theme.Spacing.lg)
                 .padding(.top, Theme.Spacing.md)
+
+            instanceToggleBar
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.top, Theme.Spacing.sm)
 
             if let connectionHint {
                 Text(connectionHint)
@@ -56,12 +61,16 @@ struct HermesView: View {
                 .padding(.bottom, Theme.Spacing.md)
         }
         .background(Theme.Palette.canvas.ignoresSafeArea())
-        .navigationTitle("Hermes")
+        .navigationTitle("Antigravity")
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.light)
         .sheet(isPresented: $showPairing) { HermesPairingView() }
         .sheet(isPresented: $showTaskSheet) { SpawnTaskSheet() }
         .sheet(isPresented: $showMessageSheet) { ChannelMessageSheet() }
+        .sheet(isPresented: $showInstanceSheet) {
+            RemoteInstancePickerSheet(selectedInstance: $hermes.selectedInstance)
+                .presentationDetents([.height(310), .medium])
+        }
         .enableInjection()
         .onAppear {
             if hermes.isConfigured {
@@ -72,16 +81,43 @@ struct HermesView: View {
             }
         }
         .onChange(of: hermes.state) { _, newState in
-            // Pairing rejections need user action on the gateway — surface the steps.
             if newState == .waitingForPairing { showPairing = true }
         }
     }
 
-    // MARK: Header
+    // MARK: Header & Remote Instance Toggle
 
     private var header: some View {
         HStack {
             StatusBadge(statusLabel, color: statusColor)
+            Button {
+                showInstanceSheet = true
+            } label: {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Theme.Palette.positive)
+                        .frame(width: 7, height: 7)
+                    Text(hermes.selectedInstance.title)
+                        .font(Theme.Font.readout(12))
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous)
+                        .fill(Theme.Palette.surface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous)
+                        .strokeBorder(Theme.Palette.border, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+
             Spacer()
             if hermes.state != .connected {
                 Button("Pair") { showPairing = true }
@@ -97,6 +133,36 @@ struct HermesView: View {
                 }
             }
         }
+    }
+
+    private var instanceToggleBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("REMOTE INSTANCE", systemImage: "folder")
+                    .font(Theme.Font.readout(10))
+                    .foregroundStyle(Theme.Palette.textMuted)
+                Spacer()
+                Text(hermes.selectedInstance.subtitle)
+                    .font(Theme.Font.readout(10))
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .lineLimit(1)
+            }
+            Picker("Remote Instance", selection: $hermes.selectedInstance) {
+                ForEach(AntigravityInstance.allCases) { instance in
+                    Text(instance.shortLabel).tag(instance)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(Theme.Spacing.sm)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
+                .fill(Theme.Palette.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
+                .strokeBorder(Theme.Palette.border, lineWidth: 1)
+        )
     }
 
     private var statusLabel: String {
@@ -123,7 +189,7 @@ struct HermesView: View {
         guard hermes.state != .connected else { return nil }
         let host = hermes.host.lowercased()
         if host == "127.0.0.1" || host == "localhost" || host == "::1" {
-            return "This address points to the iPhone, not your Mac. Pair a reachable, authenticated Hermes URL to connect controls."
+            return "This address points to the iPhone, not your VPS. Pair a reachable, authenticated Antigravity Bridge URL to connect controls."
         }
         return nil
     }
@@ -144,11 +210,11 @@ struct HermesView: View {
     private func sessionChip(_ session: AgentSessionInfo) -> some View {
         let focused = sessionKeysMatch(session.key, hermes.focusedSessionKey)
         return Button {
-            hermes.focusedSessionKey = session.key
+            Task { await hermes.selectSession(session) }
         } label: {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(session.status == "active" ? Theme.Palette.positive : Theme.Palette.textMuted)
+                    .fill(focused ? Theme.Palette.positive : Theme.Palette.textMuted)
                     .frame(width: 6, height: 6)
                 Text(session.label)
                     .font(Theme.Font.readout(12))
@@ -197,10 +263,10 @@ struct HermesView: View {
 
     private var emptyState: some View {
         VStack(spacing: Theme.Spacing.sm) {
-            Image(systemName: "command")
+            Image(systemName: "sparkles.rectangle.stack")
                 .font(.system(size: 28))
                 .foregroundStyle(Theme.Palette.textMuted)
-            Text("Ask hermes anything, spawn a task,\nor send a message through its channels.")
+            Text("Target: \(hermes.selectedInstance.title) (\(hermes.selectedInstance.workspaceLabel))\nAsk Antigravity to write or run code, spawn a background job, or tap a session above.")
                 .font(Theme.Font.body(13))
                 .foregroundStyle(Theme.Palette.textMuted)
                 .multilineTextAlignment(.center)
@@ -243,9 +309,9 @@ struct HermesView: View {
 
     private var quickActions: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            quickAction("New Task", "hammer") { showTaskSheet = true }
-            quickAction("Send Message", "paperplane") { showMessageSheet = true }
-            quickAction("Status", "list.bullet.rectangle") {
+            quickAction("New Job", "hammer") { showTaskSheet = true }
+            quickAction("Instance", "server.rack") { showInstanceSheet = true }
+            quickAction("Sync", "arrow.clockwise") {
                 Task { await hermes.refreshSessions() }
             }
         }
@@ -270,7 +336,7 @@ struct HermesView: View {
 
     private var inputBar: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            TextField("Message hermes…", text: $draft, axis: .vertical)
+            TextField("Message Antigravity (\(hermes.selectedInstance.shortLabel))…", text: $draft, axis: .vertical)
                 .lineLimit(1...4)
                 .textInputAutocapitalization(.sentences)
                 .padding(Theme.Spacing.md)
@@ -303,6 +369,59 @@ struct HermesView: View {
     }
 }
 
+// MARK: - Remote Control Instances sheet
+
+private struct RemoteInstancePickerSheet: View {
+    @Binding var selectedInstance: AntigravityInstance
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(AntigravityInstance.allCases) { instance in
+                        Button {
+                            selectedInstance = instance
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Circle()
+                                    .fill(instance == .vpsCLI ? Theme.Palette.textMuted : Theme.Palette.positive)
+                                    .frame(width: 8, height: 8)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(instance.title)
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundStyle(Theme.Palette.textPrimary)
+                                    Text(instance.subtitle)
+                                        .font(Theme.Font.readout(11))
+                                        .foregroundStyle(Theme.Palette.textSecondary)
+                                }
+                                Spacer()
+                                if selectedInstance == instance {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(Theme.Palette.textPrimary)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                } header: {
+                    Text("Remote Control Instances")
+                }
+            }
+            .navigationTitle("Antigravity Instances")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.light)
+    }
+}
+
 // MARK: - Spawn task sheet
 
 private struct SpawnTaskSheet: View {
@@ -316,12 +435,19 @@ private struct SpawnTaskSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Task") {
-                    TextField("What should hermes do?", text: $prompt, axis: .vertical)
+                Section("Remote Instance") {
+                    Picker("Target", selection: $hermes.selectedInstance) {
+                        ForEach(AntigravityInstance.allCases) { instance in
+                            Text(instance.title).tag(instance)
+                        }
+                    }
+                }
+                Section("Coding Task") {
+                    TextField("What should Antigravity build or run?", text: $prompt, axis: .vertical)
                         .lineLimit(3...8)
                 }
-                Section("Repository (optional)") {
-                    TextField("owner/repo or path", text: $repo)
+                Section("Repository / Workspace (optional)") {
+                    TextField(hermes.selectedInstance.workspaceLabel, text: $repo)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
@@ -329,7 +455,7 @@ private struct SpawnTaskSheet: View {
                     Text(errorText).foregroundStyle(Theme.Palette.live)
                 }
             }
-            .navigationTitle("New Task")
+            .navigationTitle("New Antigravity Job")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

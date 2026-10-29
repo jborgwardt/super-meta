@@ -1,6 +1,33 @@
 {
-  "originHash" : "8395bf94b207028b62cc8f3d694ae7bce0576f78c32b00b6f1f8bca8cde453bb",
+  "originHash" : "d200b91d807dcec8c0cfb8b5bfff71e2c6c8e1bb1f6b571e49fd6016d9b9faf9",
   "pins" : [
+    {
+      "identity" : "haishinkit.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Turbo1123/HaishinKit.swift",
+      "state" : {
+        "branch" : "fix-concurrency",
+        "revision" : "8b18210cb2d1c939cd28fa4896217db54907c550"
+      }
+    },
+    {
+      "identity" : "inject",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/krzysztofzablocki/Inject",
+      "state" : {
+        "revision" : "f53380e986a8b056e37d7ce9ca68de610b8415ef",
+        "version" : "1.6.0"
+      }
+    },
+    {
+      "identity" : "logboard",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/shogo4405/Logboard.git",
+      "state" : {
+        "revision" : "8f41c63afb903040b77049ee2efa8c257b8c0d50",
+        "version" : "2.6.0"
+      }
+    },
     {
       "identity" : "meta-wearables-dat-ios",
       "kind" : "remoteSourceControl",

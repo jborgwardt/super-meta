@@ -39,8 +39,10 @@ public func listModels(_ vendor: AIVendor, apiKey: String, session: URLSession =
 }
 
 private func listGeminiModels(apiKey: String, session: URLSession) async throws -> [AIModelInfo] {
-    let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(apiKey)&pageSize=200")!
-    let data = try await HTTP.send(URLRequest(url: url), session: session)
+    let url = URL(string: "\(GeminiProvider.defaultRelayBaseURL)/models?key=\(apiKey)&pageSize=200")!
+    var req = URLRequest(url: url)
+    req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    let data = try await HTTP.send(req, session: session)
     guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let models = json["models"] as? [[String: Any]] else { return [] }
     let parsed = models.compactMap { entry -> AIModelInfo? in
@@ -51,7 +53,7 @@ private func listGeminiModels(apiKey: String, session: URLSession) async throws 
         let display = entry["displayName"] as? String ?? id
         return AIModelInfo(id: id, name: display)
     }
-    return prioritized(parsed, ["gemini-3", "gemini-2.5", "gemini-2.0", "gemini-1.5", "gemini"])
+    return prioritized(parsed, ["gemini-4", "gemini-3.8", "gemini-3", "gemini-2.5", "gemini-2.0", "gemini-1.5", "gemini"])
 }
 
 private func listOpenAIModels(apiKey: String, session: URLSession) async throws -> [AIModelInfo] {

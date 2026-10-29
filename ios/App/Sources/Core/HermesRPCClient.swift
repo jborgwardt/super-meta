@@ -4,20 +4,84 @@ import AgentGateway
 
 private let log = Logger(subsystem: "com.priyanshu.metamod", category: "HermesRPC")
 
-/// Endpoint for Hermes Agent's OpenAI-compatible API server. The server is
-/// normally run by `hermes gateway` and authenticates every agent request with
-/// an `API_SERVER_KEY` bearer token.
+/// Remote Antigravity execution instances selectable from the app.
+enum AntigravityInstance: String, CaseIterable, Identifiable, Sendable {
+    case desktopVoidMars = "desktop-void-mars"
+    case macSolarAxis = "justins-macbook-pro-local-solar-axis"
+    case vpsCLI = "vps-cli"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .desktopVoidMars: return "desktop-void-mars"
+        case .macSolarAxis: return "justins-macbook-pro-local-solar-axis"
+        case .vpsCLI: return "VPS (100.64.0.18)"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .desktopVoidMars: return "desktop-void-mars"
+        case .macSolarAxis: return "solar-axis (Mac)"
+        case .vpsCLI: return "VPS CLI"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .desktopVoidMars: return "VPS Antigravity IDE · calm-franklin"
+        case .macSolarAxis: return "MacBook Pro · 100.64.0.6"
+        case .vpsCLI: return "VPS Headless CLI · /home/justin/workspace"
+        }
+    }
+
+    var workspaceLabel: String {
+        switch self {
+        case .desktopVoidMars: return "calm-franklin"
+        case .macSolarAxis: return "mac"
+        case .vpsCLI: return "CLI Project"
+        }
+    }
+
+    static func resolve(_ raw: String?) -> AntigravityInstance {
+        let lower = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.contains("solar-axis") || lower.contains("mac") || lower == "100.64.0.6" {
+            return .macSolarAxis
+        }
+        if lower == "vps-cli" || lower == "vps (100.64.0.18)" || lower == "cli" {
+            return .vpsCLI
+        }
+        return .desktopVoidMars
+    }
+}
+
+/// Endpoint for the remote VPS Antigravity Bridge (`100.64.0.18:7195`).
+/// Authenticates every request with a Bearer token and supports asynchronous
+/// coding job submission (`POST /api/jobs`) and polling (`GET /api/jobs/<id>`).
 struct HermesConfig: Sendable, Equatable {
+    static let defaultHost = "100.64.0.18"
+    static let defaultPort = 7195
+    static let defaultToken = "agy_luqSV_bhUML8RMF4v0EjZHC_mqMZTRzSXi99s70nDKs"
+
     var host: String
     var port: Int
     var useTLS: Bool
     var token: String
+    var instance: AntigravityInstance
 
-    init(host: String = "127.0.0.1", port: Int = 8642, useTLS: Bool = false, token: String = "") {
+    init(
+        host: String = HermesConfig.defaultHost,
+        port: Int = HermesConfig.defaultPort,
+        useTLS: Bool = false,
+        token: String = HermesConfig.defaultToken,
+        instance: AntigravityInstance = .desktopVoidMars
+    ) {
         self.host = host
         self.port = port
         self.useTLS = useTLS
         self.token = token
+        self.instance = instance
     }
 
     var webSocketURL: URL? {
@@ -35,24 +99,37 @@ struct HermesConfig: Sendable, Equatable {
         components.scheme = useTLS ? "https" : "http"
         components.host = host
         components.port = port
-        components.path = path
+        if let qIndex = path.firstIndex(of: "?") {
+            components.path = String(path[..<qIndex])
+            components.percentEncodedQuery = String(path[path.index(after: qIndex)...])
+        } else {
+            components.path = path
+        }
         return components.url
     }
 }
 
 struct HermesAPIReply: Sendable {
     let text: String
+    let shortReport: String
     let sessionID: String?
+    let jobID: String?
+
+    init(text: String, shortReport: String? = nil, sessionID: String? = nil, jobID: String? = nil) {
+        self.text = text
+        self.shortReport = shortReport ?? text
+        self.sessionID = sessionID
+        self.jobID = jobID
+    }
 }
 
-/// HTTP bridge modelled after VisionClaw's authenticated agent delegate. It
-/// uses Hermes' supported `/v1/chat/completions` API rather than the dashboard
-/// WebSocket, whose remote authentication is browser-session based.
+/// HTTP client for the VPS Antigravity Bridge (`100.64.0.18:7195`).
+/// Uses Bearer token authentication and the `/api/jobs` submit + poll flow.
 @MainActor
 final class HermesHTTPClient: ObservableObject {
     @Published private(set) var state: GatewayConnectionState = .disconnected
 
-    private let config: HermesConfig
+    private(set) var config: HermesConfig
     private let session: URLSession
     private var connectTask: Task<Void, Never>?
 
@@ -61,10 +138,14 @@ final class HermesHTTPClient: ObservableObject {
         self.session = session
     }
 
+    func updateConfig(_ newConfig: HermesConfig) {
+        self.config = newConfig
+    }
+
     func connect() {
         guard state != .connecting, state != .connected else { return }
         guard !config.token.isEmpty else {
-            state = .error("Hermes API key is missing. Pair a URL that includes #token=…")
+            state = .error("Antigravity Bridge token is missing.")
             return
         }
         state = .connecting
@@ -72,7 +153,7 @@ final class HermesHTTPClient: ObservableObject {
         connectTask = Task { [weak self] in
             guard let self else { return }
             do {
-                _ = try await self.request(path: "/v1/models", method: "GET")
+                _ = try await self.request(path: "/api/status", method: "GET")
                 guard !Task.isCancelled else { return }
                 self.state = .connected
             } catch {
@@ -94,38 +175,93 @@ final class HermesHTTPClient: ObservableObject {
             switch state {
             case .connected: return
             case let .error(message): throw GatewayError(code: "CONNECT_FAILED", message: message)
-            case .waitingForPairing: throw GatewayError(code: "UNAUTHORIZED", message: "Hermes rejected the API key")
+            case .waitingForPairing: throw GatewayError(code: "UNAUTHORIZED", message: "Antigravity Bridge rejected the Bearer token")
             case .disconnected, .connecting:
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
         }
-        throw GatewayError(code: "TIMEOUT", message: "Hermes API connection timed out")
+        throw GatewayError(code: "TIMEOUT", message: "Antigravity Bridge connection timed out")
     }
 
-    func chat(text: String, sessionID: String?, sessionKey: String) async throws -> HermesAPIReply {
-        let body: [String: Any] = [
-            "model": "hermes-agent",
-            "messages": [["role": "user", "content": text]],
-            "stream": false
+    /// Submits an async coding job via `POST /api/jobs` and polls `GET /api/jobs/<id>` until completion.
+    func chat(
+        text: String,
+        sessionID: String?,
+        sessionKey: String,
+        repo: String? = nil,
+        instance: AntigravityInstance? = nil,
+        onJobSubmitted: ((String) -> Void)? = nil
+    ) async throws -> HermesAPIReply {
+        let targetInstance = instance ?? config.instance
+        var submitBody: [String: Any] = [
+            "prompt": text,
+            "message": text,
+            "instance": targetInstance.rawValue
         ]
-        let data = try await request(path: "/v1/chat/completions", method: "POST", body: body, extraHeaders: [
-            "X-Hermes-Session-Key": sessionKey,
-            "X-Hermes-Session-Id": sessionID ?? ""
-        ])
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let response = message["content"] as? String, !response.isEmpty else {
-            throw GatewayError(code: "BAD_RESPONSE", message: "Hermes returned no assistant response")
+        if let sessionID, !sessionID.isEmpty, !sessionID.hasPrefix("metamod:") {
+            submitBody["conversation_id"] = sessionID
         }
-        let returnedSession = (json["hermes"] as? [String: Any])?["session_id"] as? String
-        return HermesAPIReply(text: response, sessionID: returnedSession)
+        if let repo, !repo.isEmpty {
+            submitBody["repo"] = repo
+        }
+
+        let submitData = try await request(path: "/api/jobs", method: "POST", body: submitBody)
+        guard let submitJSON = try JSONSerialization.jsonObject(with: submitData) as? [String: Any],
+              let jobID = (submitJSON["job_id"] as? String) ?? ((submitJSON["job"] as? [String: Any])?["id"] as? String),
+              !jobID.isEmpty else {
+            throw GatewayError(code: "BAD_RESPONSE", message: "Antigravity Bridge did not return a job_id")
+        }
+        onJobSubmitted?(jobID)
+
+        let deadline = Date().addingTimeInterval(600)
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            let pollData = try await request(path: "/api/jobs/\(jobID)", method: "GET")
+            guard let pollJSON = try JSONSerialization.jsonObject(with: pollData) as? [String: Any] else {
+                continue
+            }
+            let status = (pollJSON["status"] as? String) ?? ((pollJSON["job"] as? [String: Any])?["status"] as? String) ?? "running"
+            if status == "completed" {
+                let reply = (pollJSON["reply"] as? String)
+                    ?? ((pollJSON["job"] as? [String: Any])?["reply"] as? String)
+                    ?? "Coding job completed."
+                let shortReport = (pollJSON["short_report"] as? String)
+                    ?? ((pollJSON["job"] as? [String: Any])?["short_report"] as? String)
+                    ?? reply
+                let convID = (pollJSON["conversation_id"] as? String)
+                    ?? ((pollJSON["job"] as? [String: Any])?["conversation_id"] as? String)
+                return HermesAPIReply(
+                    text: reply,
+                    shortReport: shortReport,
+                    sessionID: convID,
+                    jobID: jobID
+                )
+            } else if status == "failed" {
+                let errMsg = (pollJSON["error"] as? String)
+                    ?? ((pollJSON["job"] as? [String: Any])?["error"] as? String)
+                    ?? "Antigravity coding job failed"
+                throw GatewayError(code: "JOB_FAILED", message: errMsg)
+            }
+        }
+        throw GatewayError(code: "TIMEOUT", message: "Antigravity job \(jobID) timed out after 10 minutes")
     }
 
-    func listSessions() async throws -> [[String: Any]] {
-        let data = try await request(path: "/api/sessions?limit=50", method: "GET")
+    func listSessions(instance: AntigravityInstance? = nil) async throws -> [[String: Any]] {
+        let targetInstance = instance ?? config.instance
+        let encoded = targetInstance.rawValue.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? targetInstance.rawValue
+        let data = try await request(path: "/api/conversations?instance=\(encoded)", method: "GET")
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return json?["data"] as? [[String: Any]] ?? []
+        return (json?["conversations"] as? [[String: Any]])
+            ?? (json?["sessions"] as? [[String: Any]])
+            ?? (json?["data"] as? [[String: Any]])
+            ?? []
+    }
+
+    func fetchConversationMessages(id: String) async throws -> [[String: Any]] {
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let data = try await request(path: "/api/conversations/\(encoded)", method: "GET")
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (json?["messages"] as? [[String: Any]]) ?? []
     }
 
     private func request(
@@ -135,7 +271,7 @@ final class HermesHTTPClient: ObservableObject {
         extraHeaders: [String: String] = [:]
     ) async throws -> Data {
         guard let url = config.apiURL(path: path) else {
-            throw GatewayError(code: "INVALID_URL", message: "Invalid Hermes API URL")
+            throw GatewayError(code: "INVALID_URL", message: "Invalid Antigravity API URL")
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -148,11 +284,11 @@ final class HermesHTTPClient: ObservableObject {
         }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
-            throw GatewayError(code: "NO_RESPONSE", message: "Hermes did not return an HTTP response")
+            throw GatewayError(code: "NO_RESPONSE", message: "Antigravity did not return an HTTP response")
         }
         guard (200...299).contains(http.statusCode) else {
             let error = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? [String: Any]
-            let message = error?["message"] as? String ?? "Hermes API returned HTTP \(http.statusCode)"
+            let message = error?["message"] as? String ?? "Antigravity API returned HTTP \(http.statusCode)"
             throw GatewayError(code: "HTTP_\(http.statusCode)", message: message)
         }
         return data

@@ -3,13 +3,20 @@ import Foundation
 /// Google Gemini via the Generative Language REST API.
 /// Auth is the standard API-key query parameter (`?key=`), not a Bearer token.
 public struct GeminiProvider: ChatVisionProvider {
+    public static let defaultRelayBaseURL = "http://100.64.0.4:8796/v1beta"
+
     public let vendor: AIVendor = .gemini
     private let apiKey: String
+    private let baseURL: String
     private let session: URLSession
-    private let baseURL = "https://generativelanguage.googleapis.com/v1beta"
 
-    public init(apiKey: String, session: URLSession = .shared) {
+    public init(
+        apiKey: String,
+        baseURL: String = GeminiProvider.defaultRelayBaseURL,
+        session: URLSession = .shared
+    ) {
         self.apiKey = apiKey
+        self.baseURL = baseURL
         self.session = session
     }
 
@@ -38,6 +45,7 @@ public struct GeminiProvider: ChatVisionProvider {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let data = try await HTTP.send(urlRequest, session: session)
@@ -54,7 +62,10 @@ public struct GeminiProvider: ChatVisionProvider {
               let parts = content["parts"] as? [[String: Any]] else {
             throw AIProviderError.noContent
         }
-        let text = parts.compactMap { $0["text"] as? String }.joined()
+        let text = parts
+            .filter { ($0["thought"] as? Bool) != true }
+            .compactMap { $0["text"] as? String }
+            .joined()
         guard !text.isEmpty else { throw AIProviderError.noContent }
         return text
     }

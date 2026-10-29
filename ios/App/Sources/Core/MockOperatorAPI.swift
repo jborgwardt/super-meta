@@ -34,7 +34,7 @@ final class MockOperatorAPI: OperatorAPI {
         let slow = text.localizedCaseInsensitiveContains("slow")
         let reply = slow
             ? "That took a while, but here it is: the mock agent finished the long task you asked about."
-            : "Mock hermes here — you said: \"\(text)\". All systems nominal."
+            : "Mock Antigravity here — you said: \"\(text)\". All systems nominal."
         let canonical = sessionKey.hasPrefix("agent:") ? sessionKey : "agent:main:\(sessionKey)"
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: slow ? 20_000_000_000 : 700_000_000)
@@ -53,6 +53,12 @@ final class MockOperatorAPI: OperatorAPI {
     func sessionsList() async throws -> [AgentSessionInfo] {
         try? await Task.sleep(nanoseconds: 200_000_000)
         return sessions
+    }
+
+    func sessionMessages(sessionKey: String) async throws -> [HermesChatMessage] {
+        return [
+            HermesChatMessage(role: .hermes, text: "Session \(sessionKey) ready on Antigravity.")
+        ]
     }
 
     func spawnTask(_ spec: TaskSpec) async throws -> String {

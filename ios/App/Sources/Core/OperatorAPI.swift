@@ -78,15 +78,15 @@ protocol OperatorAPI: AnyObject {
     /// Sends a chat message; returns the run id identifying the streamed reply.
     func chatSend(sessionKey: String, text: String) async throws -> String
     func sessionsList() async throws -> [AgentSessionInfo]
+    func sessionMessages(sessionKey: String) async throws -> [HermesChatMessage]
     /// Creates a session and starts it on the task prompt; returns the session key.
     func spawnTask(_ spec: TaskSpec) async throws -> String
     func channelSend(channel: String, to: String, text: String) async throws
 }
 
-// MARK: - Hermes API-server implementation
+// MARK: - Antigravity Bridge API implementation
 
-/// Delegates Gemini requests to Hermes' authenticated OpenAI-compatible API.
-/// Hermes then executes its own configured tools and connected integrations.
+/// Delegates requests to the authenticated VPS Antigravity Bridge API.
 @MainActor
 final class HermesOperatorAPI: OperatorAPI {
     var onStateChange: ((GatewayConnectionState) -> Void)?
@@ -107,7 +107,10 @@ final class HermesOperatorAPI: OperatorAPI {
     func connect() {
         // Idempotent: a launch-time auto-connect and a scenePhase resync can race;
         // don't tear down a live/in-flight socket and orphan its requests.
-        if let existing = client, existing.state == .connecting || existing.state == .connected { return }
+        if let existing = client, existing.state == .connecting || existing.state == .connected {
+            existing.updateConfig(configProvider())
+            return
+        }
         disconnect()
         activeSessionID = nil
         let client = HermesHTTPClient(config: configProvider())
@@ -132,7 +135,8 @@ final class HermesOperatorAPI: OperatorAPI {
 
     func ensureConnected() async throws {
         if client == nil { connect() }
-        guard let client else { throw GatewayError(code: "DISCONNECTED", message: "No Hermes client") }
+        guard let client else { throw GatewayError(code: "DISCONNECTED", message: "No Antigravity client") }
+        client.updateConfig(configProvider())
         if client.state != .connected {
             if client.state == .disconnected { client.connect() }
             try await client.waitUntilConnected()
@@ -144,15 +148,30 @@ final class HermesOperatorAPI: OperatorAPI {
         let runID = UUID().uuidString
         let stableSessionKey = sessionKey == Self.activeSessionKey ? "metamod:voice" : sessionKey
         let client = try requireClient()
-        let sessionID = activeSessionID
+        let currentCfg = configProvider()
+        client.updateConfig(currentCfg)
+        let explicitSessionID: String? = (sessionKey != Self.activeSessionKey && !sessionKey.hasPrefix("metamod:")) ? sessionKey : activeSessionID
         Task { @MainActor [weak self] in
             do {
-                let reply = try await client.chat(text: text, sessionID: sessionID, sessionKey: stableSessionKey)
-                self?.activeSessionID = reply.sessionID ?? sessionID
-                // Register HermesService's reply continuation before delivering
-                // an unusually fast HTTP response.
+                let reply = try await client.chat(
+                    text: text,
+                    sessionID: explicitSessionID,
+                    sessionKey: stableSessionKey,
+                    instance: currentCfg.instance,
+                    onJobSubmitted: { [weak self] jobID in
+                        Task { @MainActor [weak self] in
+                            self?.onAgentEvent?(.replyDelta(
+                                sessionKey: runID,
+                                runID: runID,
+                                cumulative: "Running coding job \(jobID) on \(currentCfg.instance.title)…",
+                                delta: nil
+                            ))
+                        }
+                    }
+                )
+                self?.activeSessionID = reply.sessionID ?? explicitSessionID
                 await Task.yield()
-                self?.onAgentEvent?(.replyFinal(sessionKey: runID, runID: runID, text: reply.text))
+                self?.onAgentEvent?(.replyFinal(sessionKey: runID, runID: runID, text: reply.shortReport))
             } catch let error as GatewayError {
                 self?.onAgentEvent?(.replyFailed(sessionKey: runID, runID: runID, message: error.message))
             } catch {
@@ -164,16 +183,31 @@ final class HermesOperatorAPI: OperatorAPI {
 
     func sessionsList() async throws -> [AgentSessionInfo] {
         try await ensureConnected()
-        let entries = try await requireClient().listSessions()
+        let currentCfg = configProvider()
+        let client = try requireClient()
+        client.updateConfig(currentCfg)
+        let entries = try await client.listSessions(instance: currentCfg.instance)
         return entries.compactMap { parseSession($0) }
+    }
+
+    func sessionMessages(sessionKey: String) async throws -> [HermesChatMessage] {
+        try await ensureConnected()
+        let rawMsgs = try await requireClient().fetchConversationMessages(id: sessionKey)
+        return rawMsgs.compactMap { entry -> HermesChatMessage? in
+            guard let content = (entry["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !content.isEmpty else { return nil }
+            let roleStr = (entry["role"] as? String ?? "assistant").lowercased()
+            let role: HermesChatMessage.Role = roleStr == "user" ? .user : (roleStr == "system" ? .system : .hermes)
+            return HermesChatMessage(role: role, text: content)
+        }
     }
 
     func spawnTask(_ spec: TaskSpec) async throws -> String {
         var prompt = spec.prompt
         if let repo = spec.repo, !repo.isEmpty { prompt = "Repository: \(repo)\n\n" + prompt }
         let key = "metamod:task:\(UUID().uuidString)"
-        _ = try await chatSend(sessionKey: key, text: "Work on this task independently and report the final result: \(prompt)")
-        return key
+        let runID = try await chatSend(sessionKey: key, text: prompt)
+        return runID
     }
 
     func channelSend(channel: String, to: String, text: String) async throws {
@@ -186,7 +220,7 @@ final class HermesOperatorAPI: OperatorAPI {
     // MARK: Parsing
 
     private func requireClient() throws -> HermesHTTPClient {
-        guard let client else { throw GatewayError(code: "DISCONNECTED", message: "Not connected to Hermes") }
+        guard let client else { throw GatewayError(code: "DISCONNECTED", message: "Not connected to Antigravity") }
         return client
     }
 

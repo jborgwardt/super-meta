@@ -40,8 +40,8 @@ public struct RealtimeConfig: Sendable {
     public var tools: [RealtimeTool]
 
     public init(
-        model: String = "gpt-realtime",
-        voice: String = "alloy",
+        model: String = "gemini-3.8-live",
+        voice: String = "Aoede",
         instructions: String = "You are a helpful assistant for someone wearing smart glasses. Keep replies brief and spoken-friendly.",
         audio: Bool = true,
         tools: [RealtimeTool] = []

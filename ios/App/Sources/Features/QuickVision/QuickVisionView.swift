@@ -58,6 +58,7 @@ final class QuickVisionViewModel: ObservableObject {
         error = nil
         isCapturing = true
         defer { isCapturing = false }
+        let keepCameraOn = glasses.isStreaming
         if !glasses.isStreaming { await glasses.startStreaming() }
         do {
             let data = try await glasses.capturePhoto()
@@ -70,6 +71,9 @@ final class QuickVisionViewModel: ObservableObject {
             } else {
                 self.error = "Couldn't get a photo from the glasses. Make sure they're connected, or use Choose photo."
             }
+        }
+        if !keepCameraOn {
+            await glasses.stopStreaming()
         }
     }
 }

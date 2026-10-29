@@ -37,7 +37,7 @@ struct GatewayView: View {
                     isConnected ? gateway.disconnect() : gateway.connect()
                 }
 
-                Text("Works with OpenClaw or Hermes gateways. Your glasses join as a node — the agent can run camera.snap and device.status.")
+                Text("Works with Antigravity and OpenClaw gateways. Your glasses join as a node — the agent can run camera.snap and device.status.")
                     .font(Theme.Font.body(13))
                     .foregroundStyle(Theme.Palette.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)

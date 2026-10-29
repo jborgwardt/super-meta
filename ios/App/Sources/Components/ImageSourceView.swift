@@ -55,7 +55,15 @@ struct ImageSourceView: View {
 
     private func capture() async {
         guard glasses.isAvailable else { return }
+        let keepCameraOn = glasses.isStreaming
         if !glasses.isStreaming { await glasses.startStreaming() }
-        if let data = try? await glasses.capturePhoto() { image = UIImage(data: data) }
+        if let data = try? await glasses.capturePhoto() {
+            image = UIImage(data: data)
+        } else if let jpeg = glasses.currentFrameJPEG() {
+            image = UIImage(data: jpeg)
+        }
+        if !keepCameraOn {
+            await glasses.stopStreaming()
+        }
     }
 }

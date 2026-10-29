@@ -4,8 +4,8 @@ import AgentGateway
 import VisionKit
 import Inject
 
-/// Pair Hermes' OpenAI-compatible API server. The API key is stored in the
-/// Keychain; Gemini only receives Hermes tools after this endpoint verifies it.
+/// Pair with the Antigravity Bridge server. The Bearer token is stored in the
+/// Keychain; Gemini Live delegates coding jobs through this authenticated connection.
 struct HermesPairingView: View {
     @EnvironmentObject private var hermes: HermesService
     @EnvironmentObject private var gateway: GatewayService
@@ -20,15 +20,15 @@ struct HermesPairingView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                    Text("Paste your Hermes API address. Gemini sends approved tool requests to Hermes through this authenticated connection.")
+                    Text("Paste your Antigravity Bridge address. Gemini Live sends coding jobs and tool requests to Antigravity through this authenticated connection.")
                         .font(Theme.Font.body(14))
                         .foregroundStyle(Theme.Palette.textSecondary)
 
                     VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                        Text("GATEWAY URL")
+                        Text("BRIDGE URL")
                             .font(Theme.Font.readout(10)).tracking(1)
                             .foregroundStyle(Theme.Palette.textMuted)
-                        TextField("https://hermes.tail1234.ts.net#token=…", text: $endpointText, axis: .vertical)
+                        TextField("http://100.64.0.18:7195#token=…", text: $endpointText, axis: .vertical)
                             .lineLimit(1...3)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -60,14 +60,14 @@ struct HermesPairingView: View {
                         }
                     }
 
-                    Text("Use Hermes behind Tailscale or another authenticated HTTPS endpoint. Do not expose the agent directly to the public internet.")
+                    Text("Use Antigravity Bridge behind Tailscale or an authenticated endpoint. Do not expose the bridge directly to the public internet.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(Theme.Palette.textMuted)
                 }
                 .padding(Theme.Spacing.lg)
             }
             .background(Theme.Palette.canvas.ignoresSafeArea())
-            .navigationTitle("Pair with Hermes")
+            .navigationTitle("Pair with Antigravity")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -88,7 +88,7 @@ struct HermesPairingView: View {
 
     private func applyEndpoint(_ raw: String) {
         guard let endpoint = Self.parseEndpoint(raw) else {
-            errorText = "Couldn't read that address. Expected something like https://host:8642#token=…"
+            errorText = "Couldn't read that address. Expected something like http://100.64.0.18:7195#token=…"
             return
         }
         errorText = nil
@@ -104,7 +104,7 @@ struct HermesPairingView: View {
     }
 
     /// Accepts `https://host:port#token=…`, `http://host:port?token=…`, or a
-    /// bare `host[:port]` (the API server defaults to port 8642).
+    /// bare `host[:port]` (the Antigravity Bridge defaults to port 7195).
     static func parseEndpoint(_ raw: String) -> (host: String, port: Int, tls: Bool, token: String?)? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
@@ -128,7 +128,7 @@ struct HermesPairingView: View {
         }
 
         let tls = components.scheme == "wss" || components.scheme == "https"
-        let port = components.port ?? (tls ? 443 : 8642)
+        let port = components.port ?? (tls ? 443 : 7195)
         return (host, port, tls, token)
     }
 }

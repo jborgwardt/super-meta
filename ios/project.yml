@@ -1,6 +1,6 @@
 name: MetaMod
 options:
-  bundleIdPrefix: com.priyanshu
+  bundleIdPrefix: com.justinborgwardt
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -47,7 +47,7 @@ targets:
       Release: Config/Secrets.xcconfig
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.priyanshu.metamod
+        PRODUCT_BUNDLE_IDENTIFIER: com.justinborgwardt.supermeta
         INFOPLIST_FILE: App/Resources/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"

@@ -53,6 +53,19 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+		<string>external-accessory</string>
+	</array>
+	<key>UISupportedExternalAccessoryProtocols</key>
+	<array>
+		<string>com.meta.ar.wearable</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Super Meta uses the local network for high-bandwidth streaming from your glasses.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_bonjour._tcp</string>
 	</array>
 
 	<!-- Meta Wearables DAT SDK integration. Credentials come from build settings
@@ -69,13 +82,21 @@
 		<string>$(DEVELOPMENT_TEAM)</string>
 	</dict>
 
-	<!-- Gemini Live API key (default realtime provider); from GEMINI_LIVE_KEY build setting. -->
+	<!-- Gemini Live relay token & host (Vertex AI Ultra relay in minimax). -->
 	<key>GeminiLiveKey</key>
 	<string>$(GEMINI_LIVE_KEY)</string>
+	<key>GeminiRelayHost</key>
+	<string>$(GEMINI_RELAY_HOST)</string>
+	<key>AntigravityBridgeHost</key>
+	<string>$(ANTIGRAVITY_BRIDGE_HOST)</string>
+	<key>AntigravityBridgePort</key>
+	<string>$(ANTIGRAVITY_BRIDGE_PORT)</string>
+	<key>AntigravityBridgeToken</key>
+	<string>$(ANTIGRAVITY_BRIDGE_TOKEN)</string>
 
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsLocalNetworking</key>
+		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>

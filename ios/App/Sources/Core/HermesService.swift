@@ -17,6 +17,23 @@ final class HermesService: ObservableObject {
     @Published var host: String { didSet { defaults.set(host, forKey: "hermes_host") } }
     @Published var port: Int { didSet { defaults.set(port, forKey: "hermes_port") } }
     @Published var useTLS: Bool { didSet { defaults.set(useTLS, forKey: "hermes_tls") } }
+    @Published var selectedInstance: AntigravityInstance {
+        didSet {
+            guard oldValue != selectedInstance else { return }
+            defaults.set(selectedInstance.rawValue, forKey: "antigravity_instance")
+            focusedSessionKey = HermesOperatorAPI.activeSessionKey
+            Task { @MainActor [weak self] in await self?.refreshSessions() }
+        }
+    }
+    /// Whether Antigravity IDE handoff is enabled alongside direct `lab-exec`.
+    /// When false, Gemini uses `lab_exec` directly for all code & host execution.
+    @Published var antigravityEnabled: Bool {
+        didSet {
+            guard oldValue != antigravityEnabled else { return }
+            defaults.set(antigravityEnabled, forKey: "antigravity_enabled")
+            if antigravityEnabled { connect() }
+        }
+    }
 
     /// Fires with the full reply of a run whose voice-budgeted ask already gave
     /// up — the voice layer announces these late answers.
@@ -41,38 +58,58 @@ final class HermesService: ObservableObject {
     private static let envEndpoint = ProcessInfo.processInfo.environment["HERMES_ENDPOINT"]
         .flatMap { HermesPairingView.parseEndpoint($0) }
 
-    /// The endpoint to use, in priority order: launch override, then an address
-    /// explicitly paired by the user. Never use an expiring public tunnel.
+    /// The endpoint to use, in priority order: launch override, user-paired Antigravity
+    /// bridge, or bundled VPS Antigravity Bridge (`100.64.0.18:7195`).
     private static func resolvedConfig(_ defaults: UserDefaults) -> HermesConfig {
+        let savedInstance = AntigravityInstance.resolve(defaults.string(forKey: "antigravity_instance"))
         if let env = envEndpoint {
-            return HermesConfig(host: env.host, port: env.port, useTLS: env.tls, token: env.token ?? "")
+            return HermesConfig(host: env.host, port: env.port, useTLS: env.tls, token: env.token ?? "", instance: savedInstance)
         }
-        // A user-paired endpoint (saved token) takes precedence over the default.
+        let bundledHost = (Bundle.main.object(forInfoDictionaryKey: "AntigravityBridgeHost") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bundledPortStr = (Bundle.main.object(forInfoDictionaryKey: "AntigravityBridgePort") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bundledToken = (Bundle.main.object(forInfoDictionaryKey: "AntigravityBridgeToken") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let defaultHost = (bundledHost?.isEmpty == false && bundledHost?.hasPrefix("$(") == false) ? bundledHost! : HermesConfig.defaultHost
+        let defaultPort = bundledPortStr.flatMap(Int.init) ?? HermesConfig.defaultPort
+        let defaultToken = (bundledToken?.isEmpty == false && bundledToken?.hasPrefix("$(") == false) ? bundledToken! : HermesConfig.defaultToken
+
         if let saved = KeychainStore.get("hermes_token"), !saved.isEmpty {
             let savedPort = defaults.integer(forKey: "hermes_port")
             return HermesConfig(
-                host: defaults.string(forKey: "hermes_host") ?? "127.0.0.1",
-                port: savedPort == 0 ? 8642 : savedPort,
+                host: defaults.string(forKey: "hermes_host") ?? defaultHost,
+                port: savedPort == 0 ? defaultPort : savedPort,
                 useTLS: defaults.bool(forKey: "hermes_tls"),
-                token: saved
+                token: saved,
+                instance: savedInstance
             )
         }
-        return HermesConfig()
+        return HermesConfig(host: defaultHost, port: defaultPort, useTLS: false, token: defaultToken, instance: savedInstance)
     }
 
     var isConfigured: Bool {
-        Self.envEndpoint != nil || !token.isEmpty || UserDefaults.standard.bool(forKey: "hermes_use_mock")
+        true
     }
 
     init(api: OperatorAPI? = nil) {
-        // Remove the retired rotating tunnel from earlier builds. Its credential
-        // was not a durable Hermes API pairing and otherwise leaves the UI stuck
-        // attempting an endpoint that no longer exists.
-        if defaults.string(forKey: "hermes_host") == "totally-mime-specials-york.trycloudflare.com" {
-            defaults.removeObject(forKey: "hermes_host")
-            defaults.removeObject(forKey: "hermes_port")
-            defaults.removeObject(forKey: "hermes_tls")
-            KeychainStore.set("", for: "hermes_token")
+        // Migrate any retired or localhost Hermes config to the VPS Antigravity Bridge (100.64.0.18:7195).
+        let currentHost = defaults.string(forKey: "hermes_host") ?? ""
+        let currentPort = defaults.integer(forKey: "hermes_port")
+        let currentToken = KeychainStore.get("hermes_token") ?? ""
+        if currentHost.isEmpty
+            || currentHost == "127.0.0.1"
+            || currentHost == "totally-mime-specials-york.trycloudflare.com"
+            || currentPort == 8642
+            || !currentToken.hasPrefix("agy_") {
+            defaults.set(HermesConfig.defaultHost, forKey: "hermes_host")
+            defaults.set(HermesConfig.defaultPort, forKey: "hermes_port")
+            defaults.set(false, forKey: "hermes_tls")
+            KeychainStore.set(HermesConfig.defaultToken, for: "hermes_token")
+        }
+        if defaults.string(forKey: "antigravity_instance") == nil {
+            defaults.set(AntigravityInstance.desktopVoidMars.rawValue, forKey: "antigravity_instance")
         }
         // Debug/managed launches can supply a complete endpoint once. Persist it
         // exactly like an in-app pairing so reconnects do not depend on a
@@ -87,6 +124,8 @@ final class HermesService: ObservableObject {
         self.host = initial.host
         self.port = initial.port
         self.useTLS = initial.useTLS
+        self.selectedInstance = initial.instance
+        self.antigravityEnabled = defaults.object(forKey: "antigravity_enabled") as? Bool ?? true
 
         if let api {
             self.api = api
@@ -169,22 +208,26 @@ final class HermesService: ObservableObject {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 self?.pendingReplies.removeValue(forKey: runID)?
-                    .resume(throwing: GatewayError(code: "TIMEOUT", message: "Hermes is still working on it"))
+                    .resume(throwing: GatewayError(code: "TIMEOUT", message: "Antigravity is still working on it"))
             }
         }
         return box.text
     }
 
-    /// Dispatches a new agent task (e.g. a coding job); returns the session key.
+    /// Dispatches a new agent task (e.g. a coding job on Antigravity); returns the run ID
+    /// and registers it in `lateReplyRuns` so `onLateReply` speaks the completion report.
     func spawnTask(prompt: String, repo: String? = nil, label: String? = nil) async throws -> String {
         try await api.ensureConnected()
-        let key = try await api.spawnTask(TaskSpec(prompt: prompt, repo: repo, label: label))
-        messages.append(HermesChatMessage(role: .system, text: "Task started in session \(shortKey(key))"))
-        await refreshSessions()
-        return key
+        let runID = try await api.spawnTask(TaskSpec(prompt: prompt, repo: repo, label: label))
+        activeRunSessionID = runID
+        lateReplyRuns.insert(runID)
+        messages.append(HermesChatMessage(role: .user, text: prompt))
+        messages.append(HermesChatMessage(role: .system, text: "Coding job submitted to Antigravity · \(selectedInstance.title) (\(shortKey(runID)))"))
+        Task { @MainActor [weak self] in await self?.refreshSessions() }
+        return runID
     }
 
-    /// Sends an outbound message through one of hermes' channels (telegram, whatsapp, …).
+    /// Sends an outbound message through one of Antigravity's channels (telegram, whatsapp, …).
     func sendChannelMessage(channel: String, to: String, text: String) async throws {
         try await api.ensureConnected()
         try await api.channelSend(channel: channel, to: to, text: text)
@@ -196,43 +239,70 @@ final class HermesService: ObservableObject {
         sessions = list
     }
 
+    func selectSession(_ session: AgentSessionInfo) async {
+        focusedSessionKey = session.key
+        if let loaded = try? await api.sessionMessages(sessionKey: session.key), !loaded.isEmpty {
+            messages = loaded
+        }
+    }
+
     // MARK: Voice tool calls
 
     /// Dispatches a realtime function call from the voice model. Always returns a
     /// JSON string — errors included — so the model can verbalize the outcome.
     func handleToolCall(name: String, argumentsJSON: String) async -> String {
         let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
+        if name.hasPrefix("lab_") {
+            let host = (args["host"] as? String) ?? "vps"
+            if name == "lab_exec", let cmd = args["cmd"] as? String {
+                messages.append(HermesChatMessage(role: .system, text: "[lab-exec · \(host)] $ \(cmd)"))
+            } else if name == "lab_write", let path = args["path"] as? String {
+                messages.append(HermesChatMessage(role: .system, text: "[lab-exec · \(host)] write \(path)"))
+            }
+            let result = await LabExecTools.executeTool(name: name, args: args)
+            if let stdout = result["stdout"] as? String, !stdout.isEmpty {
+                messages.append(HermesChatMessage(role: .hermes, text: String(stdout.prefix(600))))
+            }
+            return Self.toolJSON(result)
+        }
         do {
             switch name {
-            case "hermes_execute":
+            case "antigravity_execute", "hermes_execute":
                 guard let task = args["task"] as? String, !task.isEmpty else {
                     return Self.toolJSON(["error": "Missing task"])
                 }
-                if let reply = try await askWithBudget(task) {
+                if let reply = try await askWithBudget(task, budget: 8) {
                     return Self.toolJSON(["reply": reply])
                 }
                 return Self.toolJSON([
                     "status": "working",
-                    "note": "Hermes is continuing the task. The final result will be announced when it arrives."
+                    "instance": selectedInstance.title,
+                    "note": "Antigravity (\(selectedInstance.title)) is working on the coding job. Tell the user you've started it and will speak the result as soon as it finishes."
                 ])
-            case "hermes_ask":
+            case "antigravity_ask", "hermes_ask":
                 guard let question = args["question"] as? String, !question.isEmpty else {
                     return Self.toolJSON(["error": "Missing question"])
                 }
-                if let reply = try await askWithBudget(question, sessionKey: args["session_id"] as? String) {
+                if let reply = try await askWithBudget(question, sessionKey: args["session_id"] as? String, budget: 8) {
                     return Self.toolJSON(["reply": reply])
                 }
                 return Self.toolJSON([
                     "status": "working",
-                    "note": "Hermes is still thinking. The answer will be announced when it's ready."
+                    "instance": selectedInstance.title,
+                    "note": "Antigravity (\(selectedInstance.title)) is working on it. Tell the user you'll speak the answer when it's ready."
                 ])
-            case "hermes_spawn_task":
+            case "antigravity_spawn_task", "hermes_spawn_task":
                 guard let prompt = args["prompt"] as? String, !prompt.isEmpty else {
                     return Self.toolJSON(["error": "Missing prompt"])
                 }
                 let key = try await spawnTask(prompt: prompt, repo: args["repo"] as? String)
-                return Self.toolJSON(["status": "started", "session": shortKey(key)])
-            case "hermes_send_message":
+                return Self.toolJSON([
+                    "status": "started",
+                    "instance": selectedInstance.title,
+                    "session": shortKey(key),
+                    "note": "Coding job dispatched to Antigravity (\(selectedInstance.title)). Tell the user it's running and you will speak a short report when it finishes."
+                ])
+            case "antigravity_send_message", "hermes_send_message":
                 guard let recipient = args["recipient"] as? String, !recipient.isEmpty,
                       let message = args["message"] as? String, !message.isEmpty else {
                     return Self.toolJSON(["error": "Missing recipient or message"])
@@ -240,7 +310,7 @@ final class HermesService: ObservableObject {
                 let channel = args["channel"] as? String ?? "telegram"
                 try await sendChannelMessage(channel: channel, to: recipient, text: message)
                 return Self.toolJSON(["status": "sent", "channel": channel, "recipient": recipient])
-            case "hermes_sessions_status":
+            case "antigravity_sessions_status", "hermes_sessions_status":
                 try await api.ensureConnected()
                 await refreshSessions()
                 let summary = sessions.map { session -> [String: Any] in
@@ -248,7 +318,15 @@ final class HermesService: ObservableObject {
                     if let last = session.lastMessage { entry["lastMessage"] = String(last.prefix(200)) }
                     return entry
                 }
-                return Self.toolJSON(["sessions": summary])
+                return Self.toolJSON(["instance": selectedInstance.title, "sessions": summary])
+            case "antigravity_switch_instance":
+                let requested = args["instance"] as? String
+                selectedInstance = AntigravityInstance.resolve(requested)
+                return Self.toolJSON([
+                    "status": "switched",
+                    "instance": selectedInstance.title,
+                    "workspace": selectedInstance.workspaceLabel
+                ])
             default:
                 return Self.toolJSON(["error": "Unknown tool \(name)"])
             }
@@ -298,7 +376,9 @@ final class HermesService: ObservableObject {
             if let runID, let continuation = pendingReplies.removeValue(forKey: runID) {
                 continuation.resume(throwing: GatewayError(code: "RUN_FAILED", message: message))
             }
-            if let runID { lateReplyRuns.remove(runID) }
+            if let runID, lateReplyRuns.remove(runID) != nil {
+                onLateReply?("The Antigravity coding job failed: \(message)")
+            }
         case .sessionsChanged:
             Task { @MainActor [weak self] in await self?.refreshSessions() }
         }

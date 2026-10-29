@@ -23,11 +23,37 @@ final class ProviderManager: ObservableObject {
         didSet { defaults.set(realtimeModel, forKey: Keys.realtimeModel) }
     }
 
-    /// Default realtime model — the current Gemini Live model for real-time dialogue.
-    static let defaultRealtimeModel = "gemini-3.1-flash-live-preview"
+    /// Selected HD voice persona for Gemini 3.8 Live.
+    @Published var realtimeVoice: String {
+        didSet { defaults.set(realtimeVoice, forKey: Keys.realtimeVoice) }
+    }
 
-    /// Curated Gemini Live models offered in Settings.
-    static let knownRealtimeModels = ["gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-preview-12-2025"]
+    /// Default realtime model — the flagship Gemini 3.8 Live model on Vertex AI Ultra.
+    static let defaultRealtimeModel = "gemini-3.8-live"
+    static let defaultRealtimeVoice = "Aoede"
+
+    /// Curated Gemini Live models offered on Vertex AI in Settings.
+    static let knownRealtimeModels = ["gemini-3.8-live", "gemini-live-2.5-flash-native-audio"]
+
+    struct VoiceOption: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let tagline: String
+    }
+
+    static let availableVoices: [VoiceOption] = [
+        .init(id: "Aoede", name: "Aoede", tagline: "Warm, articulate & expressive (Default)"),
+        .init(id: "Puck", name: "Puck", tagline: "Crisp, upbeat & energetic"),
+        .init(id: "Kore", name: "Kore", tagline: "Calm, composed & clear"),
+        .init(id: "Fenrir", name: "Fenrir", tagline: "Deep, grounded & direct"),
+        .init(id: "Charon", name: "Charon", tagline: "Smooth, resonant & measured"),
+        .init(id: "Zephyr", name: "Zephyr", tagline: "Breezy, natural & conversational"),
+        .init(id: "Leda", name: "Leda", tagline: "Bright, friendly & poised"),
+        .init(id: "Orus", name: "Orus", tagline: "Confident, technical & steady")
+    ]
+
+    static let defaultRelayHost = "100.64.0.4:8796"
+    static let defaultRelayToken = "4cd31be1ce3675681348e83e6bc92d2e842d7d275edbdada"
 
     /// Per-vendor selected model id.
     @Published private(set) var models: [AIVendor: String]
@@ -37,6 +63,7 @@ final class ProviderManager: ObservableObject {
         static let visionVendor = "vision_vendor"
         static let realtimeVendor = "realtime_vendor"
         static let realtimeModel = "realtime_model"
+        static let realtimeVoice = "realtime_voice"
         static func model(_ v: AIVendor) -> String { "model_\(v.rawValue)" }
         static func key(_ v: AIVendor) -> String { "apikey_\(v.rawValue)" }
     }
@@ -57,11 +84,27 @@ final class ProviderManager: ObservableObject {
             rtModel = "gpt-realtime"
         }
         self.realtimeModel = rtModel
+        let savedVoice = defaults.string(forKey: Keys.realtimeVoice) ?? Self.defaultRealtimeVoice
+        self.realtimeVoice = Self.availableVoices.contains(where: { $0.id == savedVoice }) ? savedVoice : Self.defaultRealtimeVoice
         var loaded: [AIVendor: String] = [:]
         for vendor in AIVendor.allCases {
-            loaded[vendor] = defaults.string(forKey: Keys.model(vendor)) ?? vendor.defaultModel
+            var m = defaults.string(forKey: Keys.model(vendor)) ?? vendor.defaultModel
+            if vendor == .gemini && (m == "gemini-2.5-flash" || m.isEmpty) {
+                m = "gemini-3.8-flash"
+                defaults.set(m, forKey: Keys.model(.gemini))
+            }
+            loaded[vendor] = m
         }
         self.models = loaded
+
+        // Migrate any empty or legacy AI Studio key (AIza... / AQ....) to the minimax Vertex AI Ultra relay token.
+        let existingGeminiKey = KeychainStore.get(Keys.key(.gemini)) ?? ""
+        if existingGeminiKey.isEmpty || existingGeminiKey.hasPrefix("AIza") || existingGeminiKey.hasPrefix("AQ.") {
+            let bundled = (Bundle.main.object(forInfoDictionaryKey: "GeminiLiveKey") as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let relayToken = (!bundled.isEmpty && !bundled.hasPrefix("$(")) ? bundled : Self.defaultRelayToken
+            KeychainStore.set(relayToken, for: Keys.key(.gemini))
+        }
     }
 
     // MARK: Models
@@ -85,7 +128,36 @@ final class ProviderManager: ObservableObject {
     // MARK: API keys (Keychain)
 
     func apiKey(for vendor: AIVendor) -> String {
-        KeychainStore.get(Keys.key(vendor)) ?? ""
+        let saved = KeychainStore.get(Keys.key(vendor)) ?? ""
+        if vendor == .gemini {
+            if !saved.isEmpty && !saved.hasPrefix("AIza") && !saved.hasPrefix("AQ.") {
+                return saved
+            }
+            let bundled = (Bundle.main.object(forInfoDictionaryKey: "GeminiLiveKey") as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !bundled.isEmpty && !bundled.hasPrefix("$(") {
+                return bundled
+            }
+            return Self.defaultRelayToken
+        }
+        return saved
+    }
+
+    func geminiRelayHost() -> String {
+        let raw = (Bundle.main.object(forInfoDictionaryKey: "GeminiRelayHost") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !raw.isEmpty && !raw.hasPrefix("$(") {
+            return raw
+        }
+        return Self.defaultRelayHost
+    }
+
+    func geminiRelayWebSocketURL() -> String {
+        "ws://\(geminiRelayHost())/ws/live"
+    }
+
+    func geminiRelayRESTBaseURL() -> String {
+        "http://\(geminiRelayHost())/v1beta"
     }
 
     func setAPIKey(_ key: String, for vendor: AIVendor) {

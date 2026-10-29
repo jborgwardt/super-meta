@@ -28,8 +28,8 @@ final class GeminiLiveTests: XCTestCase {
 
     func testVisionGeneration() async throws {
         let provider = GeminiProvider(apiKey: try apiKey)
-        // A minimal 1x1 JPEG — enough to exercise the inline_data multimodal path.
-        let jpegBase64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAB//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8A0s//2Q=="
+        // A minimal valid 32x32 RGB JPEG — enough to exercise the inline_data multimodal path.
+        let jpegBase64 = "/9j/4AAQSkZJRgABAgAAAQABAAD//gAPTGF2YzYzLjEuMTAyAP/bAEMACAQEBAQEBQUFBQUFBgYGBgYGBgYGBgYGBgcHBwgICAcHBwYGBwcICAgICQkJCAgICAkJCgoKDAwLCw4ODhERFP/EAE0AAQEAAAAAAAAAAAAAAAAAAAAHAQEBAQAAAAAAAAAAAAAAAAAABQcQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAAgACADASIAAhEAAxEA/9oADAMBAAIRAxEAPwCOAN/SgAAAAAH/2Q=="
         let image = AIImage(jpegData: Data(base64Encoded: jpegBase64)!)
         let request = AIRequest(
             model: AIVendor.gemini.defaultModel,
