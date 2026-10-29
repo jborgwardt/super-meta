@@ -21,6 +21,34 @@ struct MetaModApp: App {
         _glasses = StateObject(wrappedValue: glassesService)
         _gateway = StateObject(wrappedValue: gatewayService)
         _hermes = StateObject(wrappedValue: HermesService())
+        // Wire the voice-launch handler now, not only in RootTabView.onAppear.
+        // A cold "Hey Meta, open Code" can answer LaunchApp while the phone is
+        // locked and no view has appeared; Live AI must start directly anyway.
+        let liveSession = session
+        let liveHermes = hermes
+        let liveRouter = router
+        let liveProviders = providers
+        let startVoiceSession: @MainActor () -> Void = {
+            liveRouter.liveAIWoke = true
+            if liveSession.status != .connecting && liveSession.status != .live {
+                if liveHermes.antigravityEnabled && liveHermes.isConfigured && liveHermes.state == .disconnected { liveHermes.connect() }
+                let agyActive = liveHermes.antigravityEnabled && liveHermes.isConfigured
+                liveSession.start(
+                    instructions: LiveAIMode.standard.instructions + GlassesTools.instructionsAddendum + HermesTools.instructionsAddendum(for: liveHermes.selectedInstance, antigravityEnabled: agyActive),
+                    providers: liveProviders, glasses: glassesService,
+                    injectFrames: false,
+                    tools: GlassesTools.all + HermesTools.activeTools(antigravityEnabled: agyActive))
+            }
+        }
+        glassesService.onVoiceInvocation = startVoiceSession
+        wakeListener.onWake = startVoiceSession
+        liveSession.toolHandler = { [weak liveHermes] name, argumentsJSON in
+            await liveHermes?.handleToolCall(name: name, argumentsJSON: argumentsJSON)
+                ?? #"{"error":"Antigravity bridge is not available"}"#
+        }
+        liveHermes.onLateReply = { [weak liveSession] reply in
+            liveSession?.announce(reply)
+        }
     }
 
     var body: some Scene {

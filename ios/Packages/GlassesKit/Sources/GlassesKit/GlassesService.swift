@@ -69,7 +69,18 @@ public final class GlassesService: ObservableObject {
     public var isStreaming: Bool { streamState == .streaming }
 
     /// Invoked on the main actor when Meta AI triggers a voice invocation (`"Hey Meta, start Gem"`).
-    public var onVoiceInvocation: (@MainActor () -> Void)?
+    public var onVoiceInvocation: (@MainActor () -> Void)? {
+        didSet {
+            guard onVoiceInvocation != nil, pendingVoiceLaunch else { return }
+            pendingVoiceLaunch = false
+            Self.appendDebugLog("voice launch — delivering held launch now that the handler is wired")
+            onVoiceInvocation?()
+        }
+    }
+    /// A LaunchApp answered before the app wired `onVoiceInvocation` (cold launch
+    /// straight into the invocation, UI not up yet). Held, not dropped, so the
+    /// app starting Live AI does not depend on SwiftUI `.onAppear` winning a race.
+    private var pendingVoiceLaunch = false
 
     // MARK: SDK handles (nil when the SDK isn't configured)
     private var wearables: WearablesInterface?
@@ -450,7 +461,10 @@ public final class GlassesService: ObservableObject {
     /// change asks again without tearing down the lease.
     private func ensureVoiceListening() {
         guard let stream = voiceStream else { return }
-        guard let preferred = preferredDeviceIdentifier(),
+        // Only take the lease on a linked, compatible pair. Starting on a merely
+        // known pair throws channelNotConnected locally or channelError from the
+        // glasses a second later, and reopening on that in a loop drops Classic BT.
+        guard let preferred = preferredConnectedDeviceIdentifier(),
               preferred != voiceListeningOn
         else { return }
         if voiceListeningOn != nil {
@@ -474,7 +488,12 @@ public final class GlassesService: ObservableObject {
             if !delivered {
                 Self.appendDebugLog("voice launch — the answer did not deliver")
             }
-            onVoiceInvocation?()
+            if onVoiceInvocation != nil {
+                onVoiceInvocation?()
+            } else {
+                pendingVoiceLaunch = true
+                Self.appendDebugLog("voice launch — handler not wired yet, holding launch for Live AI start")
+            }
         default:
             Self.appendDebugLog("voice — ignored \(String(describing: invocation))")
         }
