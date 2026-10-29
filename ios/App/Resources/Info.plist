@@ -58,6 +58,9 @@
 		<string>external-accessory</string>
 		<string>fetch</string>
 		<string>processing</string>
+		<string>location</string>
+		<string>remote-notification</string>
+		<string>nearby-interaction</string>
 	</array>
 	<key>UISupportedExternalAccessoryProtocols</key>
 	<array>
@@ -111,6 +114,28 @@
 	<string>Code saves photos captured from your glasses to your library.</string>
 	<key>NSSiriUsageDescription</key>
 	<string>Code uses Siri so you can trigger vision recognition hands-free.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Code reads your health data (heart rate, activity, sleep) so Live AI can answer questions about it through your glasses.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Code writes health data you ask it to record through your glasses.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Code uses your location for location-aware answers through your glasses.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Code uses your location in the background for location-aware answers through your glasses.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Code uses Face ID to unlock your session through your glasses.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Code uses your contacts to identify people you mention through your glasses.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Code uses your calendar for schedule-aware answers through your glasses.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Code uses your reminders for task-aware answers through your glasses.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Code uses your photo library to find photos through your glasses.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Code uses motion data for activity-aware answers through your glasses.</string>
+	<key>NSNearbyInteractionUsageDescription</key>
+	<string>Code uses Nearby Interaction with your glasses and nearby devices.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Code listens for your wake phrase so you can start Live AI hands-free through your glasses.</string>
 </dict>
