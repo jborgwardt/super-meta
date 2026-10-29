@@ -180,7 +180,7 @@ struct HomeView: View {
                     pillBadge(hermes.antigravityEnabled ? "lab-exec + \(hermes.selectedInstance.shortLabel)" : "lab-exec", icon: "terminal")
                 }
                 HStack(spacing: Theme.Spacing.sm) {
-                    Text(session.status == .live ? "Open Live Session" : "Start Live AI")
+                    Text(session.status == .live ? "Open Live Session" : "Open Live AI")
                         .font(.system(size: 15, weight: .semibold))
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 13, weight: .bold))
