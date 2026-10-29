@@ -96,12 +96,15 @@ public final class GlassesService: ObservableObject {
     private var speechErrorToken: AnyListenerToken?
     private var voiceStream: VoiceInvocationsStream?
     private var voiceListeningOn: DeviceIdentifier?
-    private var voiceChannelNeedsReopen = false
-    private var voiceRetryCount = 0
-    private var voiceRetryTask: Task<Void, Never>?
     private var voiceInvocationToken: AnyListenerToken?
     private var voiceErrorToken: AnyListenerToken?
     private var voiceTask: Task<Void, Never>?
+    /// True only while a voice lease is allowed to call `start`. Cleared the moment
+    /// the channel errors so a link-state callback cannot start the dying stream again.
+    private var voiceLeaseOpen = false
+    /// Bumped when the app returns to the foreground. A failed lease waits on this
+    /// (or a real glasses reconnect) instead of calling `start` on a timer.
+    private var voiceForegroundTick: Int = 0
     private var deviceTask: Task<Void, Never>?
     private var registrationTask: Task<Void, Never>?
     private var isProcessingFrame = false
@@ -205,10 +208,6 @@ public final class GlassesService: ObservableObject {
             do {
                 let handled = try await wearables.handleUrl(url)
                 Self.appendDebugLog("Wearables.handleUrl handled=\(handled)")
-                if self.voiceChannelNeedsReopen {
-                    self.voiceRetryCount = 0
-                    self.reopenVoiceStreamInPlaceIfNeeded()
-                }
             } catch {
                 log.error("Meta AI DAT callback failed: \(String(describing: error))")
                 Self.appendDebugLog("Wearables.handleUrl error=\(String(reflecting: error))")
@@ -287,132 +286,172 @@ public final class GlassesService: ObservableObject {
             .contains { $0.linkState == .connected }
     }
 
-    /// Reopens the DataX `com.meta.wearable.voice` channel in-place on the existing
-    /// `VoiceInvocationsStream` WITHOUT calling `stream.stop()` first.
-    /// Disassembly of `MWDATCore` (`0x7a8a8` -> `0x7aa0c` -> `0xa27c0`) proves that calling
-    /// `stream.start(deviceIdentifier:)` directly on an existing `VoiceInvocationsStream`
-    /// acquires the new link lease before releasing the old one, keeping the Classic Bluetooth
-    /// (`EAConnection`) link lease count >= 1 so the glasses never disconnect.
-    private func reopenVoiceStreamInPlaceIfNeeded() {
-        guard let stream = voiceStream,
-              let preferred = preferredConnectedDeviceIdentifier() else { return }
-        do {
-            voiceChannelNeedsReopen = false
-            try stream.start(deviceIdentifier: preferred)
-            voiceListeningOn = preferred
-            Self.appendDebugLog("VoiceInvocationsStream started in-place on device \(preferred)")
-        } catch {
-            voiceChannelNeedsReopen = true
-            Self.appendDebugLog("VoiceInvocationsStream.start(\(preferred)) threw: \(String(describing: error))")
+    /// Hey Meta voice channel, following Meta's BirdSpotter lease
+    /// (`DatGlassesVoiceRepository`), not an in-place `start` retry.
+    ///
+    /// `VoiceInvocationsStream.start(deviceIdentifier:)` tears down any stream already
+    /// running. Build 4332 called that in a 1s/2s/4s/8s/16s loop after
+    /// `VoiceInvocationError.channelError` (remote code 49153). Each pass dropped the
+    /// Classic Bluetooth lease and the glasses announced "Bluetooth disconnected!".
+    /// This collector opens one lease, answers `LaunchApp` before any session work,
+    /// and on failure stops that lease. The next lease waits for the glasses to
+    /// reconnect or for the app to come to the foreground.
+    private func startVoiceInvocationMonitor(_ wearables: WearablesInterface) {
+        voiceTask?.cancel()
+        voiceTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.waitUntilVoiceRegistered()
+                if Task.isCancelled { break }
+                let dropped = await self.openVoiceLeaseOnce()
+                if !dropped || Task.isCancelled { break }
+                await self.waitForNextVoiceOpportunity()
+            }
         }
     }
 
-    private func startVoiceInvocationMonitor(_ wearables: WearablesInterface) {
+    private func waitUntilVoiceRegistered() async {
+        guard let wearables else { return }
+        if wearables.registrationState == .registered { return }
+        Self.appendDebugLog("voice channel waiting for registration")
+        for await state in wearables.registrationStateStream() {
+            if Task.isCancelled { return }
+            if state == .registered { return }
+        }
+    }
+
+    /// A failed lease has already called `stop`. Wait until the glasses link goes
+    /// down and comes back, or the app is foregrounded. A clock that calls `start`
+    /// again is what disconnected Bluetooth.
+    private func waitForNextVoiceOpportunity() async {
+        guard wearables != nil else { return }
+        let tick = voiceForegroundTick
+        Self.appendDebugLog("voice channel paused until the glasses reconnect or the app is foregrounded")
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        if Task.isCancelled { return }
+        if voiceForegroundTick != tick {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            return
+        }
+        // Poll the roster. A task group here trips Swift 6's region isolation checker,
+        // and a timer that calls start() is what dropped Classic Bluetooth.
+        var sawDown = false
+        while !Task.isCancelled {
+            if voiceForegroundTick != tick {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                return
+            }
+            let up = hasAnyConnectedDevice()
+            if !up { sawDown = true }
+            if sawDown && up {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    /// One lease: listeners first, then a single `start` once the device is
+    /// connected and compatible. Returns true when the channel dropped.
+    private func openVoiceLeaseOnce() async -> Bool {
+        guard let wearables else { return false }
+        while preferredConnectedDeviceIdentifier() == nil {
+            if Task.isCancelled { return false }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        // Registration and compatibility were flipping in the same second as the
+        // failing `start` (build 4332, 19:36:21Z, compat still `.undefined`).
+        // Give the secured link a moment before taking the voice lease.
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        if Task.isCancelled || preferredConnectedDeviceIdentifier() == nil { return true }
+
         let stream: VoiceInvocationsStream
         do {
             stream = try VoiceInvocationsStream(wearables: wearables)
         } catch {
             Self.appendDebugLog("VoiceInvocationsStream init failed: \(String(describing: error))")
-            return
+            return true
         }
         self.voiceStream = stream
+        self.voiceListeningOn = nil
+        self.voiceLeaseOpen = true
+        Self.appendDebugLog("voice channel created")
 
-        self.voiceInvocationToken = stream.invocationsPublisher.listen { [weak self] invocation in
-            Task { @MainActor [weak self] in
+        voiceInvocationToken = stream.invocationsPublisher.listen { [weak self] invocation in
+            Task { @MainActor in
+                await self?.answerVoiceInvocation(invocation)
+            }
+        }
+        voiceErrorToken = stream.errorPublisher.listen { [weak self] error in
+            Task { @MainActor in
                 guard let self else { return }
-                switch invocation {
-                case let launch as LaunchApp:
-                    Self.appendDebugLog("Voice invocation LaunchApp received (device=\(launch.deviceIdentifier)) — answering Meta AI")
-                    let delivered = await launch.responseHandle.sendSuccess(actionOutput: nil)
-                    Self.appendDebugLog("LaunchApp responseHandle.sendSuccess delivered=\(delivered)")
-                    self.onVoiceInvocation?()
-                default:
-                    Self.appendDebugLog("Ignored voice invocation: \(String(describing: invocation))")
-                }
+                self.voiceLeaseOpen = false
+                Self.appendDebugLog("voice channel error \(String(reflecting: error)): \(error.description)")
             }
         }
 
-        self.voiceErrorToken = stream.errorPublisher.listen { [weak self] error in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                Self.appendDebugLog("VoiceInvocationsStream errorPublisher: \(String(reflecting: error)) (retryCount=\(self.voiceRetryCount))")
-                self.voiceChannelNeedsReopen = true
-                // CRITICAL: Do NOT call `stream.stop()` here. Calling `stream.stop()` disposes
-                // the BTC link lease on `CapabilityConnectivityManager`, which tears down
-                // `EAConnection` and causes the glasses to announce "Bluetooth disconnected!".
-                guard self.voiceRetryCount < 2 else { return }
-                self.voiceRetryCount += 1
-                let attempt = self.voiceRetryCount
-                let delaySeconds: UInt64 = (attempt == 1) ? 3 : 8
-                self.voiceRetryTask?.cancel()
-                self.voiceRetryTask = Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
-                    guard let self, !Task.isCancelled, self.voiceChannelNeedsReopen else { return }
-                    Self.appendDebugLog("VoiceInvocationsStream bounded in-place retry #\(attempt)")
-                    self.reopenVoiceStreamInPlaceIfNeeded()
-                }
+        ensureVoiceListening()
+        while voiceLeaseOpen && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled || !voiceLeaseOpen { break }
+            if voiceListeningOn != nil && preferredConnectedDeviceIdentifier() == nil {
+                Self.appendDebugLog("voice channel link dropped")
+                break
             }
+            ensureVoiceListening()
         }
+        let dropped = !Task.isCancelled
 
-        let ensureListening: @MainActor () -> Void = { [weak self] in
-            guard let self else { return }
-            if !self.hasAnyConnectedDevice() {
-                self.voiceRetryTask?.cancel()
-                self.voiceRetryTask = nil
-                self.voiceRetryCount = 0
-                self.voiceChannelNeedsReopen = false
-                if self.voiceListeningOn != nil {
-                    Self.appendDebugLog("No connected device — stopping VoiceInvocationsStream")
-                    stream.stop()
-                    self.voiceListeningOn = nil
-                }
-                return
-            }
-            guard let preferred = self.preferredConnectedDeviceIdentifier() else {
-                // Device is connected on BLE but `compatibility()` is still `.undefined`
-                // while `PeerBuildInfoRequester` finishes. Wait for compatibility listener.
-                return
-            }
-            guard preferred != self.voiceListeningOn else { return }
-            self.voiceRetryTask?.cancel()
-            self.voiceRetryCount = 0
-            self.reopenVoiceStreamInPlaceIfNeeded()
+        voiceLeaseOpen = false
+        if voiceListeningOn != nil {
+            stream.stop()
+            Self.appendDebugLog("voice channel stopped")
         }
+        voiceStream = nil
+        voiceListeningOn = nil
+        if let token = voiceInvocationToken {
+            await token.cancel()
+            voiceInvocationToken = nil
+        }
+        if let token = voiceErrorToken {
+            await token.cancel()
+            voiceErrorToken = nil
+        }
+        Self.appendDebugLog("voice channel lease ended dropped=\(dropped)")
+        return dropped
+    }
 
-        voiceTask?.cancel()
-        voiceTask = Task { @MainActor [weak self] in
-            var deviceTokens: [any AnyListenerToken] = []
-            ensureListening()
-            for await identifiers in wearables.devicesStream() {
-                if Task.isCancelled { break }
-                for token in deviceTokens { await token.cancel() }
-                deviceTokens.removeAll()
-                let devices = identifiers.compactMap { wearables.deviceForIdentifier($0) }
-                let summary = devices.map { "\($0.identifier):link=\($0.linkState),compat=\($0.compatibility())" }.joined(separator: "; ")
-                Self.appendDebugLog("devicesStream roster=[\(summary)]")
-                ensureListening()
-                for device in devices {
-                    deviceTokens.append(
-                        device.addLinkStateListener { [weak self] state in
-                            Task { @MainActor [weak self] in
-                                guard self != nil else { return }
-                                Self.appendDebugLog("device \(device.identifier) linkState -> \(state)")
-                                ensureListening()
-                            }
-                        }
-                    )
-                    deviceTokens.append(
-                        device.addCompatibilityListener { [weak self] compat in
-                            Task { @MainActor [weak self] in
-                                guard self != nil else { return }
-                                Self.appendDebugLog("device \(device.identifier) compatibility -> \(compat)")
-                                ensureListening()
-                            }
-                        }
-                    )
-                }
-            }
-            for token in deviceTokens { await token.cancel() }
+    /// Starts the channel on the connected, compatible glasses. Idempotent.
+    /// A different device stops the current lease first, which is the documented
+    /// way to move; `start` on a stream that just errored is not.
+    private func ensureVoiceListening() {
+        guard voiceLeaseOpen, let stream = voiceStream else { return }
+        guard let preferred = preferredConnectedDeviceIdentifier() else { return }
+        guard preferred != voiceListeningOn else { return }
+        if voiceListeningOn != nil {
+            stream.stop()
+            voiceListeningOn = nil
+        }
+        do {
+            try stream.start(deviceIdentifier: preferred)
+            voiceListeningOn = preferred
+            Self.appendDebugLog("voice channel listening on \(preferred)")
+        } catch {
+            voiceListeningOn = nil
+            voiceLeaseOpen = false
+            Self.appendDebugLog("voice channel would not start on \(preferred): \(String(describing: error))")
+        }
+    }
+
+    private func answerVoiceInvocation(_ invocation: any VoiceInvocation) async {
+        switch invocation {
+        case let launch as LaunchApp:
+            Self.appendDebugLog("LaunchApp received (device=\(launch.deviceIdentifier)) — answering Meta AI before session work")
+            let delivered = await launch.responseHandle.sendSuccess(actionOutput: nil)
+            Self.appendDebugLog("LaunchApp sendSuccess delivered=\(delivered)")
+            onVoiceInvocation?()
+        default:
+            Self.appendDebugLog("Ignored voice invocation: \(String(describing: invocation))")
         }
     }
 
@@ -442,10 +481,7 @@ public final class GlassesService: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if self.voiceChannelNeedsReopen {
-                    self.voiceRetryCount = 0
-                    self.reopenVoiceStreamInPlaceIfNeeded()
-                }
+                self.voiceForegroundTick &+= 1
                 if self.wantsStreaming, !self.isStreaming {
                     await self.startStreaming()
                 }
@@ -765,7 +801,7 @@ public final class GlassesService: ObservableObject {
         stateToken = nil; frameToken = nil; errorToken = nil; photoToken = nil
         speechTranscriptToken = nil; speechStateToken = nil; speechErrorToken = nil
         voiceInvocationToken = nil; voiceErrorToken = nil
-        voiceRetryTask?.cancel(); voiceTask?.cancel(); deviceTask?.cancel(); registrationTask?.cancel()
+        voiceTask?.cancel(); deviceTask?.cancel(); registrationTask?.cancel()
         if let foregroundToken { NotificationCenter.default.removeObserver(foregroundToken) }
     }
 }
