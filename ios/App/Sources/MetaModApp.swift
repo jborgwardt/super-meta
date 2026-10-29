@@ -4,6 +4,11 @@ import GlassesKit
 
 @main
 struct MetaModApp: App {
+    /// The mode last picked next to Start Live AI (`@AppStorage("liveai_mode")`
+    /// in LiveAIView). Read at launch time so glasses start the selected mode.
+    static func selectedLiveAIMode() -> LiveAIMode {
+        LiveAIMode(rawValue: UserDefaults.standard.string(forKey: "liveai_mode") ?? "") ?? .standard
+    }
     @StateObject private var glasses: GlassesService
     @StateObject private var providers = ProviderManager.shared
     @StateObject private var gateway: GatewayService
@@ -34,7 +39,7 @@ struct MetaModApp: App {
                 if liveHermes.antigravityEnabled && liveHermes.isConfigured && liveHermes.state == .disconnected { liveHermes.connect() }
                 let agyActive = liveHermes.antigravityEnabled && liveHermes.isConfigured
                 liveSession.start(
-                    instructions: LiveAIMode.standard.instructions + GlassesTools.instructionsAddendum + HermesTools.instructionsAddendum(for: liveHermes.selectedInstance, antigravityEnabled: agyActive),
+                    instructions: MetaModApp.selectedLiveAIMode().instructions + GlassesTools.instructionsAddendum + HermesTools.instructionsAddendum(for: liveHermes.selectedInstance, antigravityEnabled: agyActive),
                     providers: liveProviders, glasses: glassesService,
                     injectFrames: false,
                     tools: GlassesTools.all + HermesTools.activeTools(antigravityEnabled: agyActive))
@@ -88,7 +93,7 @@ struct MetaModApp: App {
                 if hermes.antigravityEnabled && hermes.isConfigured && hermes.state == .disconnected { hermes.connect() }
                 let agyActive = hermes.antigravityEnabled && hermes.isConfigured
                 session.start(
-                    instructions: LiveAIMode.standard.instructions + GlassesTools.instructionsAddendum + HermesTools.instructionsAddendum(for: hermes.selectedInstance, antigravityEnabled: agyActive),
+                    instructions: MetaModApp.selectedLiveAIMode().instructions + GlassesTools.instructionsAddendum + HermesTools.instructionsAddendum(for: hermes.selectedInstance, antigravityEnabled: agyActive),
                     providers: providers, glasses: glasses,
                     injectFrames: false,
                     tools: GlassesTools.all + HermesTools.activeTools(antigravityEnabled: agyActive))

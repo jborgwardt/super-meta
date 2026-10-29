@@ -10,7 +10,9 @@ struct LiveAIView: View {
     // the session is doing — including a wake-word-started conversation.
     @EnvironmentObject private var session: RealtimeSession
     @EnvironmentObject private var hermes: HermesService
-    @State private var mode: LiveAIMode = .standard
+    /// Persisted so a glasses "Hey Meta, open Code" launch starts Live AI with
+    /// the same mode the Start Live AI button would use, not always Chat.
+    @AppStorage("liveai_mode") private var mode: LiveAIMode = .standard
     @State private var showConnectGlasses = false
     @ObserveInjection var inject
 
